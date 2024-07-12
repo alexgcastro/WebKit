@@ -26,6 +26,26 @@
 #pragma once
 
 #include "WPEToplevelWayland.h"
+#include "linux-explicit-synchronization-unstable-v1-client-protocol.h"
+
+struct DMABufBuffer {
+    WTF_MAKE_STRUCT_FAST_ALLOCATED;
+
+    explicit DMABufBuffer(wl_buffer* buffer)
+        : wlBuffer(buffer)
+    {
+    }
+
+    ~DMABufBuffer() {
+        if (wlBuffer)
+            wl_buffer_destroy(wlBuffer);
+        if (release)
+            zwp_linux_buffer_release_v1_destroy(release);
+    }
+
+    struct wl_buffer* wlBuffer { nullptr };
+    struct zwp_linux_buffer_release_v1* release { nullptr };
+};
 
 void wpeToplevelWaylandSetOpaqueRectangles(WPEToplevelWayland*, WPERectangle*, unsigned);
 void wpeToplevelWaylandUpdateOpaqueRegion(WPEToplevelWayland*);
@@ -34,3 +54,5 @@ WPEView* wpeToplevelWaylandGetVisibleViewUnderPointer(WPEToplevelWayland*);
 void wpeToplevelWaylandSetIsFocused(WPEToplevelWayland*, bool);
 WPEView* wpeToplevelWaylandGetVisibleFocusedView(WPEToplevelWayland*);
 void wpeToplevelWaylandViewVisibilityChanged(WPEToplevelWayland*, WPEView*);
+gboolean wpeToplevelWaylandHasSyncObject(WPEToplevelWayland*);
+void wpeToplevelWaylandAddSyncListener(WPEToplevelWayland*, WPEBuffer*);

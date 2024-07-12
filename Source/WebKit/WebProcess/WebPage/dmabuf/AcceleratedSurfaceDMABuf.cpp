@@ -75,6 +75,10 @@ AcceleratedSurfaceDMABuf::AcceleratedSurfaceDMABuf(WebPage& webPage, Client& cli
     if (m_swapChain.type() == SwapChain::Type::EGLImage)
         m_swapChain.setupBufferFormat(m_webPage.preferredBufferFormats(), m_isOpaque);
 #endif
+    if (webPage.useExplicitSync()) {
+        auto& extensions = WebCore::PlatformDisplay::sharedDisplayForCompositing().eglExtensions();
+        m_useExplicitSync = extensions.KHR_fence_sync && extensions.ANDROID_native_fence_sync;
+    }
 }
 
 AcceleratedSurfaceDMABuf::~AcceleratedSurfaceDMABuf()
@@ -108,6 +112,11 @@ void AcceleratedSurfaceDMABuf::RenderTarget::willRenderFrame() const
 {
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depthStencilBuffer);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_depthStencilBuffer);
+}
+
+void AcceleratedSurfaceDMABuf::RenderTarget::setReleaseFence(UnixFileDescriptor&& releaseFence)
+{
+    m_releaseFence = WTFMove(releaseFence);
 }
 
 AcceleratedSurfaceDMABuf::RenderTargetColorBuffer::RenderTargetColorBuffer(uint64_t surfaceID, const WebCore::IntSize& size)
@@ -481,12 +490,13 @@ AcceleratedSurfaceDMABuf::RenderTarget* AcceleratedSurfaceDMABuf::SwapChain::nex
     return m_lockedTargets[0].get();
 }
 
-void AcceleratedSurfaceDMABuf::SwapChain::releaseTarget(uint64_t targetID)
+void AcceleratedSurfaceDMABuf::SwapChain::releaseTarget(uint64_t targetID, UnixFileDescriptor&& releaseFence)
 {
     auto index = m_lockedTargets.reverseFindIf([targetID](const auto& item) {
         return item->id() == targetID;
     });
     if (index != notFound) {
+        m_lockedTargets[index]->setReleaseFence(WTFMove(releaseFence));
         m_freeTargets.insert(0, WTFMove(m_lockedTargets[index]));
         m_lockedTargets.remove(index);
     }
@@ -595,6 +605,21 @@ void AcceleratedSurfaceDMABuf::willRenderFrame()
     if (!m_target)
         return;
 
+    if (m_useExplicitSync && m_target->supportsExplicitSync()) {
+        auto fence = m_target->takeReleaseFence();
+        if (fence != -1) {
+            auto display = WebCore::PlatformDisplay::sharedDisplayForCompositing().eglDisplay();
+            EGLint attribs[] = {
+                EGL_SYNC_NATIVE_FENCE_ANDROID, fence,
+                EGL_NONE
+            };
+            EGLSyncKHR releaseFence = eglCreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+
+            eglWaitSyncKHR(display, releaseFence, 0);
+            eglDestroySyncKHR(display, releaseFence);
+        }
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     m_target->willRenderFrame();
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -606,18 +631,25 @@ void AcceleratedSurfaceDMABuf::didRenderFrame(const std::optional<WebCore::Regio
     if (!m_target)
         return;
 
-    if (auto fence = WebCore::GLFence::create(WebCore::GLFence::ShouldFlush::No))
-        fence->wait(WebCore::GLFence::FlushCommands::Yes);
-    else
+    UnixFileDescriptor didRenderFrameFence;
+    if (m_useExplicitSync && m_target->supportsExplicitSync()) {
+        auto& display = WebCore::PlatformDisplay::sharedDisplayForCompositing();
+        EGLSyncKHR fence = eglCreateSyncKHR(display.eglDisplay(), EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+        glFlush();
+        if (fence != EGL_NO_SYNC_KHR) {
+            didRenderFrameFence = UnixFileDescriptor { eglDupNativeFenceFDANDROID(display.eglDisplay(), fence), UnixFileDescriptor::Adopt };
+            eglDestroySyncKHR(display.eglDisplay(), fence);
+        }
+    } else
         glFlush();
 
     m_target->didRenderFrame();
-    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStoreDMABuf::Frame(m_target->id(), damage), m_id);
+    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStoreDMABuf::Frame(m_target->id(), damage, WTFMove(didRenderFrameFence)), m_id);
 }
 
-void AcceleratedSurfaceDMABuf::releaseBuffer(uint64_t targetID)
+void AcceleratedSurfaceDMABuf::releaseBuffer(uint64_t targetID, UnixFileDescriptor&& releaseFence)
 {
-    m_swapChain.releaseTarget(targetID);
+    m_swapChain.releaseTarget(targetID, WTFMove(releaseFence));
 }
 
 void AcceleratedSurfaceDMABuf::frameDone()

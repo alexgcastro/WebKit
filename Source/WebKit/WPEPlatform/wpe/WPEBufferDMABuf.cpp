@@ -53,6 +53,8 @@ struct _WPEBufferDMABufPrivate {
     Vector<uint32_t> strides;
     uint64_t modifier;
     EGLImage eglImage;
+    UnixFileDescriptor finishRenderingFence;
+    UnixFileDescriptor releaseFence;
 #if USE(GBM)
     UnixFileDescriptor deviceFD;
     std::optional<struct gbm_device*> device;
@@ -381,4 +383,100 @@ guint64 wpe_buffer_dma_buf_get_modifier(WPEBufferDMABuf* buffer)
     g_return_val_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer), 0);
 
     return buffer->priv->modifier;
+}
+
+/**
+ * wpe_buffer_dma_buf_set_rendering_fence:
+ * @buffer: a #WPEBufferDMABuf
+ * @fd: a file descriptor
+ *
+ * Set the sync file descriptor to use for the @buffer.
+ * The buffer takes the ownership of the file descriptor.
+ */
+void wpe_buffer_dma_buf_set_rendering_fence(WPEBufferDMABuf* buffer, int fd)
+{
+    g_return_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer));
+
+    if (buffer->priv->finishRenderingFence.value() == fd)
+        return;
+
+    buffer->priv->finishRenderingFence = UnixFileDescriptor { fd, UnixFileDescriptor::Adopt };
+}
+
+/**
+ * wpe_buffer_dma_buf_get_rendering_fence:
+ * @buffer: a #WPEBufferDMABuf
+ *
+ * Get the sync file descriptor of @buffer.
+ *
+ * Returns: a file descriptor, or -1
+ */
+int wpe_buffer_dma_buf_get_rendering_fence(WPEBufferDMABuf* buffer)
+{
+    g_return_val_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer), -1);
+
+    return buffer->priv->finishRenderingFence.value();
+}
+
+/**
+ * wpe_buffer_dma_buf_take_rendering_fence:
+ * @buffer: a #WPEBufferDMABuf
+ *
+ * Get the sync file descriptor of @buffer and set it to -1.
+ *
+ * Returns: a file descriptor, or -1
+ */
+int wpe_buffer_dma_buf_take_rendering_fence(WPEBufferDMABuf* buffer)
+{
+    g_return_val_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer), -1);
+
+    return buffer->priv->finishRenderingFence.release();
+}
+
+ /**
+ * wpe_buffer_dma_buf_set_release_fence:
+ * @buffer: a #WPEBufferDMABuf
+ * @fd: a file descriptor
+ *
+ * Set the release fence file descriptor to use for the @buffer.  The
+ * buffer takes the ownership of the file descriptor.
+ */
+void wpe_buffer_dma_buf_set_release_fence(WPEBufferDMABuf* buffer, int fd)
+{
+    g_return_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer));
+
+    if (buffer->priv->releaseFence.value() == fd)
+        return;
+
+    buffer->priv->releaseFence = UnixFileDescriptor { fd, UnixFileDescriptor::Adopt };
+}
+
+/**
+ * wpe_buffer_dma_buf_get_release_fence:
+ * @buffer: a #WPEBufferDMABuf
+ *
+ * Get the release fence file descriptor of @buffer.
+ *
+ * Returns: a file descriptor, or -1
+ */
+int wpe_buffer_dma_buf_get_release_fence(WPEBufferDMABuf* buffer)
+{
+    g_return_val_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer), -1);
+
+    return buffer->priv->releaseFence.value();
+}
+
+/**
+ * wpe_buffer_dma_buf_take_release_fence:
+ * @buffer: a #WPEBufferDMABuf
+ *
+ * Get the release fence file descriptor of @buffer and set it to -1.
+ *
+ * Returns: a file descriptor, or -1
+ */
+int wpe_buffer_dma_buf_take_release_fence(WPEBufferDMABuf* buffer)
+{
+    g_return_val_if_fail(WPE_IS_BUFFER_DMA_BUF(buffer), -1);
+
+    return buffer->priv->releaseFence.release();
 }

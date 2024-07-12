@@ -105,6 +105,8 @@ public:
     bool eglCheckVersion(int major, int minor) const;
 
     struct EGLExtensions {
+        bool ANDROID_native_fence_sync { false };
+        bool KHR_fence_sync { false };
         bool KHR_image_base { false };
         bool KHR_surfaceless_context { false };
         bool EXT_image_dma_buf_import { false };

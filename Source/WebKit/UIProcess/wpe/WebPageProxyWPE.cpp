@@ -192,6 +192,18 @@ OptionSet<WebCore::PlatformEvent::Modifier> WebPageProxy::currentStateOfModifier
 #endif
 }
 
+bool WebPageProxy::useExplicitSync() const
+{
+#if ENABLE(WPE_PLATFORM)
+    auto* view = wpeView();
+    if (!view)
+        return false;
+    return wpe_display_use_explicit_sync(wpe_view_get_display(view));
+#else
+    return false;
+#endif
+}
+
 void WebPageProxy::callAfterNextPresentationUpdate(CompletionHandler<void()>&& callback)
 {
     if (!hasRunningProcess() || !m_drawingArea) {

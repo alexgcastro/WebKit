@@ -30,6 +30,7 @@
 #include "WPEDisplayWaylandPrivate.h"
 #include "WPEToplevelWaylandPrivate.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "linux-explicit-synchronization-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -39,6 +40,7 @@
 #include <wtf/glib/GWeakPtr.h>
 #include <wtf/glib/WTFGType.h>
 #include <wtf/text/CString.h>
+#include <wtf/unix/UnixFileDescriptor.h>
 
 #if USE(LIBDRM)
 #include <xf86drm.h>
@@ -224,6 +226,7 @@ struct _WPEToplevelWaylandPrivate {
     struct xdg_toplevel* xdgToplevel;
 
     struct zwp_linux_dmabuf_feedback_v1* dmabufFeedback;
+    struct zwp_linux_surface_synchronization_v1* sync;
     std::unique_ptr<DMABufFeedback> pendingDMABufFeedback;
     std::unique_ptr<DMABufFeedback> committedDMABufFeedback;
     GRefPtr<WPEBufferDMABufFormats> preferredDMABufFormats;
@@ -574,6 +577,9 @@ static void wpeToplevelWaylandConstructed(GObject *object)
             wl_surface_set_buffer_scale(priv->wlSurface, scale);
         wpe_toplevel_scale_changed(toplevel, scale);
     }
+
+    if (auto* explicitSync = wpeDisplayWaylandGetLinuxExplicitSync(display))
+        priv->sync = zwp_linux_explicit_synchronization_v1_get_synchronization(explicitSync, priv->wlSurface);
 }
 
 static void wpeToplevelWaylandDispose(GObject* object)
@@ -583,6 +589,7 @@ static void wpeToplevelWaylandDispose(GObject* object)
     priv->monitors.clear();
     g_clear_pointer(&priv->xdgToplevel, xdg_toplevel_destroy);
     g_clear_pointer(&priv->dmabufFeedback, zwp_linux_dmabuf_feedback_v1_destroy);
+    g_clear_pointer(&priv->sync, zwp_linux_surface_synchronization_v1_destroy);
     g_clear_pointer(&priv->xdgSurface, xdg_surface_destroy);
     g_clear_pointer(&priv->wlSurface, wl_surface_destroy);
 
@@ -839,6 +846,43 @@ void wpeToplevelWaylandViewVisibilityChanged(WPEToplevelWayland* toplevel, WPEVi
                 wpe_view_focus_out(view);
         }
         priv->visibleView.reset(visibleView);
+    }
+}
+
+const struct zwp_linux_buffer_release_v1_listener bufferReleaseListener = {
+    // fenced_release
+    [](void* userData, struct zwp_linux_buffer_release_v1*, int32_t fence)
+    {
+        auto* buffer = WPE_BUFFER(userData);
+        wpe_buffer_dma_buf_set_release_fence(WPE_BUFFER_DMA_BUF(buffer), fence);
+        wpe_view_buffer_released(wpe_buffer_get_view(buffer), buffer);
+        if (auto* dmaBufBuffer = static_cast<DMABufBuffer*>(wpe_buffer_get_user_data(buffer)))
+            g_clear_pointer(&dmaBufBuffer->release, zwp_linux_buffer_release_v1_destroy);
+    },
+    // immediate_release
+    [](void* userData, struct zwp_linux_buffer_release_v1*)
+    {
+        auto* buffer = WPE_BUFFER(userData);
+        wpe_view_buffer_released(wpe_buffer_get_view(buffer), buffer);
+        if (auto* dmaBufBuffer = static_cast<DMABufBuffer*>(wpe_buffer_get_user_data(buffer)))
+            g_clear_pointer(&dmaBufBuffer->release, zwp_linux_buffer_release_v1_destroy);
+    }
+};
+
+gboolean wpeToplevelWaylandHasSyncObject(WPEToplevelWayland* toplevel)
+{
+    return !!toplevel->priv->sync;
+}
+
+void wpeToplevelWaylandAddSyncListener(WPEToplevelWayland* toplevel, WPEBuffer* buffer)
+{
+    auto finishRenderingFence = UnixFileDescriptor { wpe_buffer_dma_buf_take_rendering_fence(WPE_BUFFER_DMA_BUF(buffer)), UnixFileDescriptor::Adopt };
+    if (finishRenderingFence) {
+        zwp_linux_surface_synchronization_v1_set_acquire_fence(toplevel->priv->sync, finishRenderingFence.value());
+
+        auto* dmaBufBuffer = static_cast<DMABufBuffer*>(wpe_buffer_get_user_data(buffer));
+        dmaBufBuffer->release = zwp_linux_surface_synchronization_v1_get_release(toplevel->priv->sync);
+        zwp_linux_buffer_release_v1_add_listener(dmaBufBuffer->release, &bufferReleaseListener, buffer);
     }
 }
 

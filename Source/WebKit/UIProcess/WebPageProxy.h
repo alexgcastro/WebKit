@@ -2727,6 +2727,7 @@ private:
 #if PLATFORM(GTK) || PLATFORM(WPE)
     void bindAccessibilityTree(const String&);
     OptionSet<WebCore::PlatformEventModifier> currentStateOfModifierKeys();
+    bool useExplicitSync() const;
 #endif
 
 #if PLATFORM(GTK)

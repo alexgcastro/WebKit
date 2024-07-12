@@ -10494,6 +10494,7 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
 #if PLATFORM(WPE)
     parameters.preferredBufferFormats = preferredBufferFormats();
 #endif
+    parameters.useExplicitSync = useExplicitSync();
 #endif
     return parameters;
 }
