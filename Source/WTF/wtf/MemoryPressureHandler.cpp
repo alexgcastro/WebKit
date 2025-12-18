@@ -85,11 +85,16 @@ void MemoryPressureHandler::setMemoryFootprintPollIntervalForTesting(Seconds pol
 
 void MemoryPressureHandler::setShouldUsePeriodicMemoryMonitor(bool use)
 {
+#if PLATFORM(GTK) || PLATFORM(WPE)
+    UNUSED_PARAM(use);
+    m_measurementTimer = nullptr;
+#else
     if (use) {
         m_measurementTimer = makeUnique<RunLoop::Timer>(RunLoop::mainSingleton(), "MemoryPressureHandler::MeasurementTimer"_s, this, &MemoryPressureHandler::measurementTimerFired);
         m_measurementTimer->startRepeating(m_configuration.pollInterval);
     } else
         m_measurementTimer = nullptr;
+#endif
 }
 
 #if !RELEASE_LOG_DISABLED
