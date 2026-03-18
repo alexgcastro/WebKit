@@ -5364,6 +5364,12 @@ webkit.org/b/309893 http/tests/images/heic-as-heif.html [ Pass Timeout ImageOnly
 webkit.org/b/310178 css3/font-variant-font-face-override.html [ ImageOnlyFailure ]
 webkit.org/b/310178 fast/canvas/fill-text-with-font-features.html [ ImageOnlyFailure ]
 
+webkit.org/b/310212 imported/w3c/web-platform-tests/css/css-shapes/shape-outside/shape-image/shape-image-013.html [ Pass ImageOnlyFailure ]
+
+webkit.org/b/310213 http/tests/xmlhttprequest/chunked-progress-event-expectedLength.html [ Pass Failure ]
+
+webkit.org/b/310215 fast/loader/submit-form-while-parsing-2.html [ Pass Failure Timeout ]
+
 # End: Common failures between GTK and WPE.
 
 #////////////////////////////////////////////////////////////////////////////////////////
