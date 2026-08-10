@@ -33,6 +33,7 @@
 #include "BitmapTexture.h"
 #include "IntSize.h"
 #include "PixelFormat.h"
+#include <atomic>
 #include <wtf/Condition.h>
 #include <wtf/Lock.h>
 #include <wtf/MallocSpan.h>
@@ -72,6 +73,10 @@ public:
     virtual void beginPainting();
     virtual void completePainting();
     void waitUntilPaintingComplete();
+    WEBCORE_EXPORT bool isPaintingComplete();
+    void setCountedInCommit(uint32_t sequence) { m_commitSequence.store(sequence, std::memory_order_relaxed); m_countedInCommit.store(true, std::memory_order_release); }
+    bool consumeCountedInCommit() { return m_countedInCommit.exchange(false, std::memory_order_acq_rel); }
+    uint32_t commitSequence() const { return m_commitSequence.load(std::memory_order_relaxed); }
 
 #if USE(SKIA)
     virtual SkCanvas* canvas() = 0;
@@ -101,6 +106,9 @@ protected:
         Condition condition;
         PaintingState state { PaintingState::Complete };
     } m_painting;
+
+    std::atomic<bool> m_countedInCommit { false };
+    std::atomic<uint32_t> m_commitSequence { 0 };
 
 private:
     Flags m_flags;

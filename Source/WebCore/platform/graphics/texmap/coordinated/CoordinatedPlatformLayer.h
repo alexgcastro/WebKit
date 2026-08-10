@@ -93,6 +93,8 @@ public:
         virtual int maxTextureSize() const = 0;
         virtual void willPaintTile() = 0;
         virtual void didPaintTile() = 0;
+        virtual void committedTileBufferWillPaint(unsigned) { }
+        virtual void committedTileBufferPainted(unsigned) { }
     };
 
     static Ref<CoordinatedPlatformLayer> create();
@@ -208,9 +210,9 @@ public:
     void updateBackingStore();
 
     void flushPendingState();
-    void commitState();
+    void commitState(unsigned sequence);
     void flushPositionChanges(const OptionSet<CompositionReason>&);
-    void flushCompositingState(const OptionSet<CompositionReason>&);
+    void flushCompositingState(const OptionSet<CompositionReason>&, unsigned maxReadySequence);
 
     bool hasPendingTilesCreation() const { assertIsMainThread(); return m_pendingTilesCreation; }
     bool hasPendingBackingStoreTileUpdates() const;
@@ -221,7 +223,7 @@ public:
     int maxTextureSize() const;
 
     void willPaintTile();
-    void didPaintTile();
+    void didPaintTile(CoordinatedTileBuffer&);
     void waitUntilPaintingComplete();
 
     bool hasPendingContentsBufferForTesting();
@@ -243,9 +245,9 @@ private:
     void damageWholeLayer() WTF_REQUIRES_LOCK(m_lock);
 
 #if USE(TEXTURE_MAPPER)
-    void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, TextureMapperLayer&);
+    void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, unsigned maxReadySequence, TextureMapperLayer&);
 #else
-    void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, SkiaCompositingLayer&);
+    void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, unsigned maxReadySequence, SkiaCompositingLayer&);
 #endif
 
     enum class Change : uint8_t {
@@ -384,6 +386,7 @@ private:
     } m_pendingState WTF_GUARDED_BY_LOCK(m_lock);
 
     struct CommitState {
+        unsigned sequence { 0 };
         EnumSet<Change> changes;
         FloatPoint3D anchorPoint;
         FloatSize size;

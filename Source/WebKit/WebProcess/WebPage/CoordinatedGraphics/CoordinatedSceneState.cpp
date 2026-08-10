@@ -117,9 +117,46 @@ void CoordinatedSceneState::commitState()
     ASSERT(isMainRunLoop());
     Locker stateLock { m_stateLock };
     Locker layersLock { m_layersLock };
-    m_rootLayer->commitState();
+    auto sequence = m_lastCommitSequence.load() + 1;
+    m_lastCommitSequence.store(sequence);
+    m_rootLayer->commitState(sequence);
     for (Ref layer : m_layers)
-        layer->commitState();
+        layer->commitState(sequence);
+}
+
+void CoordinatedSceneState::willPaintCommittedTile(unsigned sequence)
+{
+    Locker locker { m_generationsLock };
+    for (auto& generation : m_generations) {
+        if (generation.first == sequence) {
+            generation.second++;
+            return;
+        }
+    }
+    m_generations.append({ sequence, 1 });
+}
+
+void CoordinatedSceneState::didPaintCommittedTile(unsigned sequence)
+{
+    Locker locker { m_generationsLock };
+    for (auto& generation : m_generations) {
+        if (generation.first == sequence) {
+            ASSERT(generation.second > 0);
+            generation.second--;
+            return;
+        }
+    }
+}
+
+unsigned CoordinatedSceneState::maxReadySequence()
+{
+    Locker locker { m_generationsLock };
+    unsigned maxReady = m_lastCommitSequence.load();
+    while (!m_generations.isEmpty() && !m_generations.first().second)
+        m_generations.removeFirst();
+    if (!m_generations.isEmpty())
+        maxReady = std::min(maxReady, m_generations.first().first - 1);
+    return maxReady;
 }
 
 void CoordinatedSceneState::commitPendingLayers()
@@ -135,7 +172,7 @@ void CoordinatedSceneState::commitPendingLayers()
         m_committedLayers = WTF::move(m_pendingLayers);
 }
 
-void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionReason>& reasons)
+void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionReason>& reasons, unsigned maxReadySequence)
 {
     commitPendingLayers();
 
@@ -147,9 +184,9 @@ void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionRea
     }
 
     Vector<Ref<CoordinatedPlatformLayer>, 16> layersWithPendingTileUpdates;
-    m_rootLayer->flushCompositingState(reasons);
+    m_rootLayer->flushCompositingState(reasons, maxReadySequence);
     for (auto& layer : m_committedLayers) {
-        layer->flushCompositingState(reasons);
+        layer->flushCompositingState(reasons, maxReadySequence);
         if (layer->hasPendingBackingStoreTileUpdates())
             layersWithPendingTileUpdates.append(Ref { layer });
     }

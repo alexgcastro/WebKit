@@ -298,7 +298,7 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
         }
 
         buffer->completePainting();
-        platformLayer->didPaintTile();
+        platformLayer->didPaintTile(buffer.get());
     });
 
     return buffer;

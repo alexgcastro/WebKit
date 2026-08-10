@@ -99,6 +99,8 @@ private:
     int maxTextureSize() const override;
     void willPaintTile() override;
     void didPaintTile() override;
+    void committedTileBufferWillPaint(unsigned) override;
+    void committedTileBufferPainted(unsigned) override;
 
     // GraphicsLayerFactory
     Ref<WebCore::GraphicsLayer> createGraphicsLayer(WebCore::GraphicsLayer::Type, WebCore::GraphicsLayerClient&) override;

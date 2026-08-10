@@ -42,6 +42,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include <wtf/Atomics.h>
 #include <wtf/CheckedPtr.h>
+#include <wtf/Deque.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/OptionSet.h>
 #include <wtf/TZoneMalloc.h>
@@ -90,7 +91,8 @@ public:
     void pendingTilesDidChange();
 
     void setSize(const WebCore::IntSize&, float);
-    void requestCompositionForRenderingUpdate(Function<void()>&&);
+    void requestCompositionForRenderingUpdate(Function<void()>&&, unsigned sequence);
+    void sceneCommitDidEnd();
     void requestComposition(WebCore::CompositionReason);
     RunLoop* runLoop();
 
@@ -128,7 +130,7 @@ private:
     bool isOnlyRenderingUpdatePendingAndWaitingForTiles() const;
 
     void scheduleUpdateLocked();
-    void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+    void flushCompositingState(const OptionSet<WebCore::CompositionReason>&, unsigned maxReadySequence);
     void renderLayerTree();
     TargetContents paintToCurrentGLContext(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
 #if USE(TEXTURE_MAPPER)
@@ -184,7 +186,8 @@ private:
         bool isRenderTimerActive WTF_GUARDED_BY_LOCK(lock) { false };
         bool isWaitingForTiles WTF_GUARDED_BY_LOCK(lock) { false };
         OptionSet<WebCore::CompositionReason> reasons WTF_GUARDED_BY_LOCK(lock);
-        Function<void()> didCompositeRenderingUpdateFunction WTF_GUARDED_BY_LOCK(lock);
+        Deque<std::pair<unsigned, Function<void()>>> didCompositeRenderingUpdateFunctions WTF_GUARDED_BY_LOCK(lock);
+        Deque<Function<void()>> didCompositeRenderingUpdateFunctionsToNotify WTF_GUARDED_BY_LOCK(lock);
     } m_state;
 
     struct {

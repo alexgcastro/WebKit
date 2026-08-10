@@ -1020,11 +1020,14 @@ void CoordinatedPlatformLayer::willPaintTile()
     m_client->willPaintTile();
 }
 
-void CoordinatedPlatformLayer::didPaintTile()
+void CoordinatedPlatformLayer::didPaintTile(CoordinatedTileBuffer& buffer)
 {
     // Could be called from painting threads.
-    if (m_client)
+    if (m_client) {
         m_client->didPaintTile();
+        if (buffer.consumeCountedInCommit())
+            m_client->committedTileBufferPainted(buffer.commitSequence());
+    }
 }
 
 void CoordinatedPlatformLayer::waitUntilPaintingComplete()
@@ -1109,7 +1112,7 @@ void CoordinatedPlatformLayer::flushPositionChanges(const OptionSet<CompositionR
     applyPositionChanges(ensureTarget());
 }
 
-void CoordinatedPlatformLayer::commitState()
+void CoordinatedPlatformLayer::commitState(unsigned sequence)
 {
     flushPendingState();
 
@@ -1128,6 +1131,7 @@ void CoordinatedPlatformLayer::commitState()
         return;
 
     CommitState committed;
+    committed.sequence = sequence;
     committed.changes = changes;
     if (committed.changes.contains(Change::ContentsBuffer)) {
         committed.contentsBuffer = WTF::move(m_contentsBuffer.pending);
@@ -1203,27 +1207,38 @@ void CoordinatedPlatformLayer::commitState()
     if (committed.changes.contains(Change::Damage))
         committed.damage = std::exchange(m_damage, std::nullopt);
 #endif
+    for (const auto& tileUpdate : update.tilesToUpdate()) {
+        if (!tileUpdate.buffer->isPaintingComplete()) {
+            if (m_client)
+                m_client->committedTileBufferWillPaint(sequence);
+            tileUpdate.buffer->setCountedInCommit(sequence);
+            if (tileUpdate.buffer->isPaintingComplete() && tileUpdate.buffer->consumeCountedInCommit()) {
+                if (m_client)
+                    m_client->committedTileBufferPainted(sequence);
+            }
+        }
+    }
     committed.backingStoreUpdate = WTF::move(update);
     m_commitQueue.append(WTF::move(committed));
 }
 
-void CoordinatedPlatformLayer::flushCompositingState(const OptionSet<CompositionReason>& reasons)
+void CoordinatedPlatformLayer::flushCompositingState(const OptionSet<CompositionReason>& reasons, unsigned maxReadySequence)
 {
     ASSERT(!isMainThread());
     Locker locker { m_lock };
-    bool hasReadyCommits = reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty();
+    bool hasReadyCommits = reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty() && m_commitQueue.first().sequence <= maxReadySequence;
     bool hasVideoFrame = reasons.contains(CompositionReason::VideoFrame) && isVideoBuffer(m_contentsBuffer.pending.get());
     if (!hasReadyCommits && !hasVideoFrame)
         return;
 
-    flushCompositingStateOnTarget(reasons, ensureTarget());
+    flushCompositingStateOnTarget(reasons, maxReadySequence, ensureTarget());
 }
 
 #if USE(TEXTURE_MAPPER)
-void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, TextureMapperLayer& layer)
+void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, unsigned maxReadySequence, TextureMapperLayer& layer)
 {
     assertIsHeld(m_lock);
-    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty()) {
+    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty() && m_commitQueue.first().sequence <= maxReadySequence) {
         auto committed = m_commitQueue.takeFirst();
         if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
             if (committed.changes.contains(Change::ContentsRect)) {
@@ -1443,10 +1458,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
 }
 #else
 
-void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, SkiaCompositingLayer& layer)
+void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, unsigned maxReadySequence, SkiaCompositingLayer& layer)
 {
     assertIsHeld(m_lock);
-    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty()) {
+    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty() && m_commitQueue.first().sequence <= maxReadySequence) {
         auto committed = m_commitQueue.takeFirst();
         if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
             if (committed.changes.contains(Change::ContentsRect)) {

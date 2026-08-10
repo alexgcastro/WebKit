@@ -94,6 +94,12 @@ void CoordinatedTileBuffer::completePainting()
 #endif
 }
 
+bool CoordinatedTileBuffer::isPaintingComplete()
+{
+    Locker locker { m_painting.lock };
+    return m_painting.state == PaintingState::Complete;
+}
+
 void CoordinatedTileBuffer::waitUntilPaintingComplete()
 {
     Locker locker { m_painting.lock };
