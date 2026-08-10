@@ -139,6 +139,23 @@ static bool shouldReleaseBuffer(CoordinatedPlatformLayerBuffer* buffer)
     return true;
 }
 
+static bool isVideoBuffer(CoordinatedPlatformLayerBuffer* buffer)
+{
+    if (!buffer)
+        return false;
+
+#if ENABLE(VIDEO)
+    if (is<CoordinatedPlatformLayerBufferHolePunch>(*buffer))
+        return true;
+#if USE(GSTREAMER)
+    if (is<CoordinatedPlatformLayerBufferVideo>(*buffer))
+        return true;
+#endif
+#endif
+
+    return false;
+}
+
 void CoordinatedPlatformLayer::invalidateTarget()
 {
     ASSERT(!isMainThread());
@@ -1017,6 +1034,18 @@ void CoordinatedPlatformLayer::waitUntilPaintingComplete()
         m_backingStoreProxy->waitUntilPaintingComplete();
 }
 
+bool CoordinatedPlatformLayer::hasPendingContentsBufferForTesting()
+{
+    Locker locker { m_lock };
+    return !!m_contentsBuffer.pending;
+}
+
+bool CoordinatedPlatformLayer::hasQueuedCommitsForTesting()
+{
+    Locker locker { m_lock };
+    return !m_commitQueue.isEmpty();
+}
+
 void CoordinatedPlatformLayer::flushPendingState()
 {
     Locker locker { m_lock };
@@ -1080,11 +1109,111 @@ void CoordinatedPlatformLayer::flushPositionChanges(const OptionSet<CompositionR
     applyPositionChanges(ensureTarget());
 }
 
+void CoordinatedPlatformLayer::commitState()
+{
+    flushPendingState();
+
+    Locker locker { m_lock };
+    auto update = m_backingStoreProxy ? m_backingStoreProxy->takePendingUpdate() : CoordinatedBackingStoreProxy::Update { };
+    auto changes = std::exchange(m_pendingChanges, { });
+    if (changes.contains(Change::Position)) {
+        changes.remove(Change::Position);
+        m_pendingChanges.add(Change::Position);
+    }
+    if (changes.contains(Change::BoundsOrigin)) {
+        changes.remove(Change::BoundsOrigin);
+        m_pendingChanges.add(Change::BoundsOrigin);
+    }
+    if (changes.isEmpty() && update.isEmpty())
+        return;
+
+    CommitState committed;
+    committed.changes = changes;
+    if (committed.changes.contains(Change::ContentsBuffer)) {
+        committed.contentsBuffer = WTF::move(m_contentsBuffer.pending);
+        m_contentsBuffer.hasCommitted = !!committed.contentsBuffer;
+    }
+    committed.contentsScale = m_contentsScale;
+    if (committed.changes.contains(Change::AnchorPoint))
+        committed.anchorPoint = m_anchorPoint;
+    if (committed.changes.contains(Change::Size))
+        committed.size = m_size;
+    if (committed.changes.contains(Change::Transform))
+        committed.transform = m_transform;
+    if (committed.changes.contains(Change::ChildrenTransform))
+        committed.childrenTransform = m_childrenTransform;
+    if (committed.changes.contains(Change::MasksToBounds))
+        committed.masksToBounds = m_masksToBounds;
+    if (committed.changes.contains(Change::Preserves3D))
+        committed.preserves3D = m_preserves3D;
+    if (committed.changes.contains(Change::BackfaceVisibility))
+        committed.backfaceVisibility = m_backfaceVisibility;
+    if (committed.changes.contains(Change::BackgroundColor))
+        committed.backgroundColor = m_backgroundColor;
+    if (committed.changes.contains(Change::Opacity))
+        committed.opacity = m_opacity;
+    if (committed.changes.contains(Change::BlendMode))
+        committed.blendMode = m_blendMode;
+    if (committed.changes.contains(Change::ContentsVisible))
+        committed.contentsVisible = m_contentsVisible;
+    if (committed.changes.contains(Change::ContentsOpaque))
+        committed.contentsOpaque = m_contentsOpaque;
+    if (committed.changes.contains(Change::ContentsRect))
+        committed.contentsRect = m_contentsRect;
+    if (committed.changes.contains(Change::ContentsRectClipsDescendants))
+        committed.contentsRectClipsDescendants = m_contentsRectClipsDescendants;
+    if (committed.changes.contains(Change::ContentsClippingRect))
+        committed.contentsClippingRect = m_contentsClippingRect;
+    if (committed.changes.contains(Change::ContentsColor))
+        committed.contentsColor = m_contentsColor;
+    if (committed.changes.contains(Change::ContentsTiling)) {
+        committed.contentsTileSize = m_contentsTileSize;
+        committed.contentsTilePhase = m_contentsTilePhase;
+    }
+    if (committed.changes.contains(Change::Filters))
+        committed.filters = m_filters;
+    if (committed.changes.contains(Change::Mask))
+        committed.mask = m_mask;
+    if (committed.changes.contains(Change::Replica))
+        committed.replica = m_replica;
+    if (committed.changes.contains(Change::Backdrop))
+        committed.backdrop = m_backdrop;
+    if (committed.changes.contains(Change::BackdropRect))
+        committed.backdropRect = m_backdropRect;
+    if (committed.changes.contains(Change::BackdropRoot))
+        committed.isBackdropRoot = m_isBackdropRoot;
+    if (committed.changes.contains(Change::Animations))
+        committed.animations = m_animations;
+    if (committed.changes.contains(Change::DebugIndicators)) {
+        committed.debugBorderColor = m_debugBorderColor;
+        committed.debugBorderWidth = m_debugBorderWidth;
+        committed.repaintCount = m_repaintCount;
+    }
+    if (committed.changes.contains(Change::Children))
+        committed.children = WTF::map(m_children, [](auto& child) { return child.copyRef(); });
+    if (committed.changes.contains(Change::ClipPath)) {
+        committed.clipPath.path = m_clipPath.path;
+        committed.clipPath.windRule = m_clipPath.windRule;
+    }
+    if (committed.changes.contains(Change::ContentsClipShapePath))
+        committed.contentsClipShapePath = m_contentsClipShapePath;
+    if (committed.changes.contains(Change::BackdropShapePath))
+        committed.backdropShapePath = m_backdropShapePath;
+#if ENABLE(DAMAGE_TRACKING)
+    if (committed.changes.contains(Change::Damage))
+        committed.damage = std::exchange(m_damage, std::nullopt);
+#endif
+    committed.backingStoreUpdate = WTF::move(update);
+    m_commitQueue.append(WTF::move(committed));
+}
+
 void CoordinatedPlatformLayer::flushCompositingState(const OptionSet<CompositionReason>& reasons)
 {
     ASSERT(!isMainThread());
     Locker locker { m_lock };
-    if (m_pendingChanges.isEmpty() && (!reasons.contains(CompositionReason::RenderingUpdate) || !m_backingStoreProxy))
+    bool hasReadyCommits = reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty();
+    bool hasVideoFrame = reasons.contains(CompositionReason::VideoFrame) && isVideoBuffer(m_contentsBuffer.pending.get());
+    if (!hasReadyCommits && !hasVideoFrame)
         return;
 
     flushCompositingStateOnTarget(reasons, ensureTarget());
@@ -1094,424 +1223,450 @@ void CoordinatedPlatformLayer::flushCompositingState(const OptionSet<Composition
 void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, TextureMapperLayer& layer)
 {
     assertIsHeld(m_lock);
-    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
-        if (m_pendingChanges.contains(Change::ContentsRect)) {
-            layer.setContentsRect(m_contentsRect);
-            m_pendingChanges.remove(Change::ContentsRect);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsClippingRect)) {
-            layer.setContentsClippingRect(m_contentsClippingRect);
-            m_pendingChanges.remove(Change::ContentsClippingRect);
-        }
-
-        // FIXME: clip the contents to the corner-shape contour here too. TextureMapper::beginClip()
-        // takes a ClipPath, a triangulated vertex buffer, so this needs a Path tessellation step that
-        // does not exist yet; until then a non-round corner shape on composited contents is clipped
-        // only by the rect above.
-        m_pendingChanges.remove(Change::ContentsClipShapePath);
-    }
-
-    if (reasons.contains(CompositionReason::RenderingUpdate)) {
-        if (m_pendingChanges.contains(Change::AnchorPoint)) {
-            layer.setAnchorPoint(m_anchorPoint);
-            m_pendingChanges.remove(Change::AnchorPoint);
-        }
-
-        if (m_pendingChanges.contains(Change::Size)) {
-            layer.setSize(m_size);
-            m_pendingChanges.remove(Change::Size);
-        }
-
-        if (m_pendingChanges.contains(Change::Transform)) {
-            layer.setTransform(m_transform);
-            m_pendingChanges.remove(Change::Transform);
-        }
-
-        if (m_pendingChanges.contains(Change::ChildrenTransform)) {
-            layer.setChildrenTransform(m_childrenTransform);
-            m_pendingChanges.remove(Change::ChildrenTransform);
-        }
-
-        if (m_pendingChanges.contains(Change::Preserves3D)) {
-            layer.setPreserves3D(m_preserves3D);
-            m_pendingChanges.remove(Change::Preserves3D);
-        }
-
-        if (m_pendingChanges.contains(Change::MasksToBounds)) {
-            layer.setMasksToBounds(m_masksToBounds);
-            m_pendingChanges.remove(Change::MasksToBounds);
-        }
-
-        if (m_pendingChanges.contains(Change::BackfaceVisibility)) {
-            layer.setBackfaceVisibility(m_backfaceVisibility);
-            m_pendingChanges.remove(Change::BackfaceVisibility);
-        }
-
-        if (m_pendingChanges.contains(Change::BackgroundColor)) {
-            layer.setBackgroundColor(m_backgroundColor);
-            m_pendingChanges.remove(Change::BackgroundColor);
-        }
-
-        if (m_pendingChanges.contains(Change::Opacity)) {
-            layer.setOpacity(m_opacity);
-            m_pendingChanges.remove(Change::Opacity);
-        }
-
-        if (m_pendingChanges.contains(Change::BackingStore)) {
-            if (m_backingStoreProxy) {
-                if (!m_backingStore)
-                    m_backingStore = CoordinatedBackingStore::create();
-                layer.setBackingStore(m_backingStore.get());
-                layer.setBackgroundColor({ });
-
-                if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
-                    layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
-            } else {
-                layer.setBackingStore(nullptr);
-                layer.setAnimatedBackingStoreClient(nullptr);
-                m_backingStore = nullptr;
+    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty()) {
+        auto committed = m_commitQueue.takeFirst();
+        if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
+            if (committed.changes.contains(Change::ContentsRect)) {
+                layer.setContentsRect(committed.contentsRect);
+                committed.changes.remove(Change::ContentsRect);
             }
-            m_pendingChanges.remove(Change::BackingStore);
+
+            if (committed.changes.contains(Change::ContentsClippingRect)) {
+                layer.setContentsClippingRect(committed.contentsClippingRect);
+                committed.changes.remove(Change::ContentsClippingRect);
+            }
+
+            // FIXME: clip the contents to the corner-shape contour here too. TextureMapper::beginClip()
+            // takes a ClipPath, a triangulated vertex buffer, so this needs a Path tessellation step that
+            // does not exist yet; until then a non-round corner shape on composited contents is clipped
+            // only by the rect above.
+            committed.changes.remove(Change::ContentsClipShapePath);
         }
 
-        if (m_pendingChanges.contains(Change::ContentsImage)) {
-            m_imageBackingStore.committed = m_imageBackingStore.current;
-            m_pendingChanges.remove(Change::ContentsImage);
-        }
+        if (reasons.contains(CompositionReason::RenderingUpdate)) {
+            if (committed.changes.contains(Change::AnchorPoint)) {
+                layer.setAnchorPoint(committed.anchorPoint);
+                committed.changes.remove(Change::AnchorPoint);
+            }
 
-        if (m_pendingChanges.contains(Change::ContentsVisible)) {
-            layer.setContentsVisible(m_contentsVisible);
-            m_pendingChanges.remove(Change::ContentsVisible);
-        }
+            if (committed.changes.contains(Change::Size)) {
+                layer.setSize(committed.size);
+                committed.changes.remove(Change::Size);
+            }
 
-        if (m_pendingChanges.contains(Change::ContentsOpaque)) {
-            layer.setContentsOpaque(m_contentsOpaque);
-            m_pendingChanges.remove(Change::ContentsOpaque);
-        }
+            if (committed.changes.contains(Change::Transform)) {
+                layer.setTransform(committed.transform);
+                committed.changes.remove(Change::Transform);
+            }
 
-        if (m_pendingChanges.contains(Change::ContentsRectClipsDescendants)) {
-            layer.setContentsRectClipsDescendants(m_contentsRectClipsDescendants);
-            m_pendingChanges.remove(Change::ContentsRectClipsDescendants);
-        }
+            if (committed.changes.contains(Change::ChildrenTransform)) {
+                layer.setChildrenTransform(committed.childrenTransform);
+                committed.changes.remove(Change::ChildrenTransform);
+            }
 
-        if (m_pendingChanges.contains(Change::ContentsTiling)) {
-            layer.setContentsTileSize(m_contentsTileSize);
-            layer.setContentsTilePhase(m_contentsTilePhase);
-            m_pendingChanges.remove(Change::ContentsTiling);
-        }
+            if (committed.changes.contains(Change::Preserves3D)) {
+                layer.setPreserves3D(committed.preserves3D);
+                committed.changes.remove(Change::Preserves3D);
+            }
 
-        if (m_pendingChanges.contains(Change::ContentsColor)) {
-            layer.setSolidColor(m_contentsColor);
-            m_pendingChanges.remove(Change::ContentsColor);
-        }
+            if (committed.changes.contains(Change::MasksToBounds)) {
+                layer.setMasksToBounds(committed.masksToBounds);
+                committed.changes.remove(Change::MasksToBounds);
+            }
+
+            if (committed.changes.contains(Change::BackfaceVisibility)) {
+                layer.setBackfaceVisibility(committed.backfaceVisibility);
+                committed.changes.remove(Change::BackfaceVisibility);
+            }
+
+            if (committed.changes.contains(Change::BackgroundColor)) {
+                layer.setBackgroundColor(committed.backgroundColor);
+                committed.changes.remove(Change::BackgroundColor);
+            }
+
+            if (committed.changes.contains(Change::Opacity)) {
+                layer.setOpacity(committed.opacity);
+                committed.changes.remove(Change::Opacity);
+            }
+
+            if (committed.changes.contains(Change::BackingStore)) {
+                if (m_backingStoreProxy) {
+                    if (!m_backingStore)
+                        m_backingStore = CoordinatedBackingStore::create();
+                    layer.setBackingStore(m_backingStore.get());
+                    layer.setBackgroundColor({ });
+
+                    if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
+                        layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
+                } else {
+                    layer.setBackingStore(nullptr);
+                    layer.setAnimatedBackingStoreClient(nullptr);
+                    m_backingStore = nullptr;
+                }
+                committed.changes.remove(Change::BackingStore);
+            }
+
+            if (committed.changes.contains(Change::ContentsImage)) {
+                m_imageBackingStore.committed = m_imageBackingStore.current;
+                committed.changes.remove(Change::ContentsImage);
+            }
+
+            if (committed.changes.contains(Change::ContentsVisible)) {
+                layer.setContentsVisible(committed.contentsVisible);
+                committed.changes.remove(Change::ContentsVisible);
+            }
+
+            if (committed.changes.contains(Change::ContentsOpaque)) {
+                layer.setContentsOpaque(committed.contentsOpaque);
+                committed.changes.remove(Change::ContentsOpaque);
+            }
+
+            if (committed.changes.contains(Change::ContentsRectClipsDescendants)) {
+                layer.setContentsRectClipsDescendants(committed.contentsRectClipsDescendants);
+                committed.changes.remove(Change::ContentsRectClipsDescendants);
+            }
+
+            if (committed.changes.contains(Change::ContentsTiling)) {
+                layer.setContentsTileSize(committed.contentsTileSize);
+                layer.setContentsTilePhase(committed.contentsTilePhase);
+                committed.changes.remove(Change::ContentsTiling);
+            }
+
+            if (committed.changes.contains(Change::ContentsColor)) {
+                layer.setSolidColor(committed.contentsColor);
+                committed.changes.remove(Change::ContentsColor);
+            }
 
 #if ENABLE(DAMAGE_TRACKING)
-        if (m_pendingChanges.contains(Change::Damage)) {
-            ASSERT(m_damage.has_value());
-            layer.setDamage(*std::exchange(m_damage, std::nullopt));
-            m_pendingChanges.remove(Change::Damage);
-        }
+            if (committed.changes.contains(Change::Damage)) {
+                ASSERT(committed.damage.has_value());
+                layer.setDamage(*std::exchange(committed.damage, std::nullopt));
+                committed.changes.remove(Change::Damage);
+            }
 #endif
 
-        if (m_pendingChanges.contains(Change::Filters)) {
-            layer.setFilters(m_filters);
-            m_pendingChanges.remove(Change::Filters);
+            if (committed.changes.contains(Change::Filters)) {
+                layer.setFilters(committed.filters);
+                committed.changes.remove(Change::Filters);
+            }
+
+            if (committed.changes.contains(Change::Mask)) {
+                layer.setMaskLayer(committed.mask ? &committed.mask->ensureTarget() : nullptr);
+                committed.changes.remove(Change::Mask);
+            }
+
+            if (committed.changes.contains(Change::Replica)) {
+                layer.setReplicaLayer(committed.replica ? &committed.replica->ensureTarget() : nullptr);
+                committed.changes.remove(Change::Replica);
+            }
+
+            if (committed.changes.contains(Change::Backdrop)) {
+                layer.setBackdropLayer(committed.backdrop ? &committed.backdrop->ensureTarget() : nullptr);
+                committed.changes.remove(Change::Backdrop);
+            }
+
+            if (committed.changes.contains(Change::BackdropRect)) {
+                layer.setBackdropFiltersRect(committed.backdropRect);
+                committed.changes.remove(Change::BackdropRect);
+            }
+
+            // FIXME: clip the backdrop to the corner-shape contour here too. TextureMapper::beginClip()
+            // takes a ClipPath, a triangulated vertex buffer, so this needs a Path tessellation step that
+            // does not exist yet; until then a non-round corner shape on a backdrop filter is clipped only
+            // by the rounded rect above. The Skia compositor, which GTK and WPE use by default, clips to
+            // the contour.
+            committed.changes.remove(Change::BackdropShapePath);
+
+            if (committed.changes.contains(Change::Animations)) {
+                layer.setAnimations(committed.animations);
+                committed.changes.remove(Change::Animations);
+            }
+
+            if (committed.changes.contains(Change::DebugIndicators)) {
+                layer.setShowRepaintCounter(committed.repaintCount != -1);
+                layer.setRepaintCount(committed.repaintCount);
+
+                layer.setShowDebugBorder(committed.debugBorderColor.isVisible());
+                layer.setDebugBorderColor(committed.debugBorderColor);
+                layer.setDebugBorderWidth(committed.debugBorderWidth);
+                committed.changes.remove(Change::DebugIndicators);
+            }
+
+            if (committed.changes.contains(Change::Children)) {
+                layer.setChildren(WTF::map(committed.children, [](auto& child) {
+                    return &child->ensureTarget();
+                }));
+                committed.changes.remove(Change::Children);
+            }
+
+            if (m_backingStoreProxy) {
+                m_backingStore->resize(layer.size(), committed.contentsScale);
+
+                auto update = WTF::move(committed.backingStoreUpdate);
+                for (auto tileID : update.tilesToCreate())
+                    m_backingStore->createTile(tileID);
+                for (auto tileID : update.tilesToRemove())
+                    m_backingStore->removeTile(tileID);
+                for (const auto& tileUpdate : update.tilesToUpdate())
+                    m_backingStore->updateTile(tileUpdate.tileID, tileUpdate.dirtyRect, tileUpdate.tileRect, tileUpdate.buffer.copyRef(), { });
+            }
         }
 
-        if (m_pendingChanges.contains(Change::Mask)) {
-            layer.setMaskLayer(m_mask ? &m_mask->ensureTarget() : nullptr);
-            m_pendingChanges.remove(Change::Mask);
-        }
+        if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
+            if (committed.changes.contains(Change::ContentsBuffer)) {
+                m_contentsBuffer.committed = WTF::move(committed.contentsBuffer);
+                committed.changes.remove(Change::ContentsBuffer);
+            }
 
-        if (m_pendingChanges.contains(Change::Replica)) {
-            layer.setReplicaLayer(m_replica ? &m_replica->ensureTarget() : nullptr);
-            m_pendingChanges.remove(Change::Replica);
-        }
-
-        if (m_pendingChanges.contains(Change::Backdrop)) {
-            layer.setBackdropLayer(m_backdrop ? &m_backdrop->ensureTarget() : nullptr);
-            m_pendingChanges.remove(Change::Backdrop);
-        }
-
-        if (m_pendingChanges.contains(Change::BackdropRect)) {
-            layer.setBackdropFiltersRect(m_backdropRect);
-            m_pendingChanges.remove(Change::BackdropRect);
-        }
-
-        // FIXME: clip the backdrop to the corner-shape contour here too. TextureMapper::beginClip()
-        // takes a ClipPath, a triangulated vertex buffer, so this needs a Path tessellation step that
-        // does not exist yet; until then a non-round corner shape on a backdrop filter is clipped only
-        // by the rounded rect above. The Skia compositor, which GTK and WPE use by default, clips to
-        // the contour.
-        m_pendingChanges.remove(Change::BackdropShapePath);
-
-        if (m_pendingChanges.contains(Change::Animations)) {
-            layer.setAnimations(m_animations);
-            m_pendingChanges.remove(Change::Animations);
-        }
-
-        if (m_pendingChanges.contains(Change::DebugIndicators)) {
-            layer.setShowRepaintCounter(m_repaintCount != -1);
-            layer.setRepaintCount(m_repaintCount);
-
-            layer.setShowDebugBorder(m_debugBorderColor.isVisible());
-            layer.setDebugBorderColor(m_debugBorderColor);
-            layer.setDebugBorderWidth(m_debugBorderWidth);
-            m_pendingChanges.remove(Change::DebugIndicators);
-        }
-
-        if (m_pendingChanges.contains(Change::Children)) {
-            layer.setChildren(WTF::map(m_children, [](auto& child) {
-                return &child->ensureTarget();
-            }));
-            m_pendingChanges.remove(Change::Children);
-        }
-
-        if (m_backingStoreProxy) {
-            m_backingStore->resize(layer.size(), m_contentsScale);
-
-            auto update = m_backingStoreProxy->takePendingUpdate();
-            for (auto tileID : update.tilesToCreate())
-                m_backingStore->createTile(tileID);
-            for (auto tileID : update.tilesToRemove())
-                m_backingStore->removeTile(tileID);
-            for (const auto& tileUpdate : update.tilesToUpdate())
-                m_backingStore->updateTile(tileUpdate.tileID, tileUpdate.dirtyRect, tileUpdate.tileRect, tileUpdate.buffer.copyRef(), { });
+            if (m_contentsBuffer.committed)
+                layer.setContentsLayer(m_contentsBuffer.committed.get());
+            else if (m_imageBackingStore.committed) {
+                if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling }))
+                    layer.setContentsLayer(m_imageBackingStore.committed->buffer());
+            } else
+                layer.setContentsLayer(nullptr);
         }
     }
 
-    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
-        if (m_pendingChanges.contains(Change::ContentsBuffer)) {
-            m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
-            m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
-            m_pendingChanges.remove(Change::ContentsBuffer);
+    if (reasons.contains(CompositionReason::VideoFrame) && isVideoBuffer(m_contentsBuffer.pending.get())) {
+        for (auto& pending : m_commitQueue) {
+            if (pending.changes.contains(Change::ContentsBuffer) && isVideoBuffer(pending.contentsBuffer.get())) {
+                pending.contentsBuffer = nullptr;
+                pending.changes.remove(Change::ContentsBuffer);
+            }
         }
-
-        if (m_contentsBuffer.committed)
-            layer.setContentsLayer(m_contentsBuffer.committed.get());
-        else if (m_imageBackingStore.committed) {
-            if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling }))
-                layer.setContentsLayer(m_imageBackingStore.committed->buffer());
-        } else
-            layer.setContentsLayer(nullptr);
+        m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
+        m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
+        layer.setContentsLayer(m_contentsBuffer.committed.get());
+        m_pendingChanges.remove(Change::ContentsBuffer);
     }
 }
-
 #else
 
 void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<CompositionReason>& reasons, SkiaCompositingLayer& layer)
 {
     assertIsHeld(m_lock);
-    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
-        if (m_pendingChanges.contains(Change::ContentsRect)) {
-            layer.setContentsRect(m_contentsRect);
-            m_pendingChanges.remove(Change::ContentsRect);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsClippingRect)) {
-            layer.setContentsClippingRect(m_contentsClippingRect);
-            m_pendingChanges.remove(Change::ContentsClippingRect);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsClipShapePath)) {
-            if (m_contentsClipShapePath.isEmpty())
-                layer.setContentsClipPath(std::nullopt);
-            else {
-                auto contentsClipPath = *m_contentsClipShapePath.platformPath();
-                contentsClipPath.setFillType(SkPathFillType::kWinding);
-                layer.setContentsClipPath(WTF::move(contentsClipPath));
+    while (reasons.contains(CompositionReason::RenderingUpdate) && !m_commitQueue.isEmpty()) {
+        auto committed = m_commitQueue.takeFirst();
+        if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
+            if (committed.changes.contains(Change::ContentsRect)) {
+                layer.setContentsRect(committed.contentsRect);
+                committed.changes.remove(Change::ContentsRect);
             }
-            m_pendingChanges.remove(Change::ContentsClipShapePath);
-        }
 
-        if (m_pendingChanges.contains(Change::ContentsImage)) {
-            layer.setImageBackingStore(m_imageBackingStore.current);
-            m_pendingChanges.remove(Change::ContentsImage);
-        }
-    }
+            if (committed.changes.contains(Change::ContentsClippingRect)) {
+                layer.setContentsClippingRect(committed.contentsClippingRect);
+                committed.changes.remove(Change::ContentsClippingRect);
+            }
 
-    if (reasons.contains(CompositionReason::RenderingUpdate)) {
-        if (m_pendingChanges.contains(Change::AnchorPoint)) {
-            layer.setAnchorPoint(m_anchorPoint);
-            m_pendingChanges.remove(Change::AnchorPoint);
-        }
+            if (committed.changes.contains(Change::ContentsClipShapePath)) {
+                if (committed.contentsClipShapePath.isEmpty())
+                    layer.setContentsClipPath(std::nullopt);
+                else {
+                    auto contentsClipPath = *committed.contentsClipShapePath.platformPath();
+                    contentsClipPath.setFillType(SkPathFillType::kWinding);
+                    layer.setContentsClipPath(WTF::move(contentsClipPath));
+                }
+                committed.changes.remove(Change::ContentsClipShapePath);
+            }
 
-        if (m_pendingChanges.contains(Change::Size)) {
-            layer.setSize(m_size);
-            m_pendingChanges.remove(Change::Size);
-        }
-
-        if (m_pendingChanges.contains(Change::Transform)) {
-            layer.setTransform(m_transform);
-            m_pendingChanges.remove(Change::Transform);
-        }
-
-        if (m_pendingChanges.contains(Change::ChildrenTransform)) {
-            layer.setChildrenTransform(m_childrenTransform);
-            m_pendingChanges.remove(Change::ChildrenTransform);
-        }
-
-        if (m_pendingChanges.contains(Change::Preserves3D)) {
-            layer.setPreserves3D(m_preserves3D);
-            m_pendingChanges.remove(Change::Preserves3D);
-        }
-
-        if (m_pendingChanges.contains(Change::MasksToBounds)) {
-            layer.setMasksToBounds(m_masksToBounds);
-            m_pendingChanges.remove(Change::MasksToBounds);
-        }
-
-        if (m_pendingChanges.contains(Change::BackfaceVisibility)) {
-            layer.setBackfaceVisibility(m_backfaceVisibility);
-            m_pendingChanges.remove(Change::BackfaceVisibility);
-        }
-
-        if (m_pendingChanges.contains(Change::BackgroundColor)) {
-            layer.setBackgroundColor(m_backgroundColor);
-            m_pendingChanges.remove(Change::BackgroundColor);
-        }
-
-        if (m_pendingChanges.contains(Change::Opacity)) {
-            layer.setOpacity(m_opacity);
-            m_pendingChanges.remove(Change::Opacity);
-        }
-
-        if (m_pendingChanges.contains(Change::BlendMode)) {
-            layer.setBlendMode(m_blendMode);
-            m_pendingChanges.remove(Change::BlendMode);
-        }
-
-        if (m_pendingChanges.contains(Change::BackingStore)) {
-            layer.setUseBackingStore(!!m_backingStoreProxy, m_backingStoreProxy ? m_backingStoreProxy->animatedBackingStoreClient() : nullptr);
-            m_pendingChanges.remove(Change::BackingStore);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsVisible)) {
-            layer.setContentsVisible(m_contentsVisible);
-            m_pendingChanges.remove(Change::ContentsVisible);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsOpaque)) {
-            layer.setContentsOpaque(m_contentsOpaque);
-            m_pendingChanges.remove(Change::ContentsOpaque);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsRectClipsDescendants)) {
-            layer.setContentsRectClipsDescendants(m_contentsRectClipsDescendants);
-            m_pendingChanges.remove(Change::ContentsRectClipsDescendants);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsTiling)) {
-            layer.setContentsTiling(m_contentsTileSize, m_contentsTilePhase);
-            m_pendingChanges.remove(Change::ContentsTiling);
-        }
-
-        if (m_pendingChanges.contains(Change::ContentsColor)) {
-            layer.setContentsSolidColor(m_contentsColor);
-            m_pendingChanges.remove(Change::ContentsColor);
-        }
-
-        if (m_pendingChanges.contains(Change::ClipPath)) {
-            auto clipPath = *m_clipPath.path.platformPath();
-            clipPath.setFillType(m_clipPath.windRule == WindRule::EvenOdd ? SkPathFillType::kEvenOdd : SkPathFillType::kWinding);
-            layer.setClipPath(WTF::move(clipPath));
-            m_pendingChanges.remove(Change::ClipPath);
-        }
-
-        if (m_pendingChanges.contains(Change::Filters)) {
-            layer.setFilters(m_filters);
-            m_pendingChanges.remove(Change::Filters);
-        }
-
-        if (m_pendingChanges.contains(Change::Mask)) {
-            layer.setMask(m_mask ? RefPtr { &m_mask->ensureTarget() } : nullptr);
-            m_pendingChanges.remove(Change::Mask);
-        }
-
-        if (m_pendingChanges.contains(Change::Replica)) {
-            layer.setReplica(m_replica ? RefPtr { &m_replica->ensureTarget() } : nullptr);
-            m_pendingChanges.remove(Change::Replica);
-        }
-
-        // FIXME: stop creating a layer for backdrop filters when switching to SkiaCompositingLayer.
-        if (m_pendingChanges.contains(Change::Backdrop) && !m_backdrop) {
-            layer.setBackdropFilters(FilterOperations());
-            m_pendingChanges.remove(Change::Backdrop);
-        } else if (m_backdrop) {
-            Locker locker { m_backdrop->lock() };
-            if (m_pendingChanges.contains(Change::Backdrop) || m_backdrop->m_pendingChanges.contains(Change::Filters)) {
-                layer.setBackdropFilters(m_backdrop->m_filters);
-                m_pendingChanges.remove(Change::Backdrop);
-                m_backdrop->m_pendingChanges.remove(Change::Filters);
+            if (committed.changes.contains(Change::ContentsImage)) {
+                layer.setImageBackingStore(m_imageBackingStore.current);
+                committed.changes.remove(Change::ContentsImage);
             }
         }
 
-        if (m_pendingChanges.contains(Change::BackdropRect)) {
-            layer.setBackdropFiltersRect(m_backdropRect);
-            m_pendingChanges.remove(Change::BackdropRect);
-        }
-
-        if (m_pendingChanges.contains(Change::BackdropShapePath)) {
-            if (m_backdropShapePath.isEmpty())
-                layer.setBackdropFiltersClipPath(std::nullopt);
-            else {
-                auto backdropClipPath = *m_backdropShapePath.platformPath();
-                backdropClipPath.setFillType(SkPathFillType::kWinding);
-                layer.setBackdropFiltersClipPath(WTF::move(backdropClipPath));
+        if (reasons.contains(CompositionReason::RenderingUpdate)) {
+            if (committed.changes.contains(Change::AnchorPoint)) {
+                layer.setAnchorPoint(committed.anchorPoint);
+                committed.changes.remove(Change::AnchorPoint);
             }
-            m_pendingChanges.remove(Change::BackdropShapePath);
-        }
 
-        if (m_pendingChanges.contains(Change::BackdropRoot)) {
-            layer.setIsBackdropRoot(m_isBackdropRoot);
-            m_pendingChanges.remove(Change::BackdropRoot);
-        }
-
-        if (m_pendingChanges.contains(Change::Animations)) {
-            layer.setAnimations(m_animations);
-            m_pendingChanges.remove(Change::Animations);
-        }
-
-        if (m_pendingChanges.contains(Change::DebugIndicators)) {
-            Color color;
-            std::optional<float> width;
-            if (m_debugBorderColor.isVisible()) {
-                color = m_debugBorderColor;
-                width = m_debugBorderWidth;
+            if (committed.changes.contains(Change::Size)) {
+                layer.setSize(committed.size);
+                committed.changes.remove(Change::Size);
             }
-            std::optional<unsigned> repaintCount;
-            if (m_repaintCount != -1)
-                repaintCount = m_repaintCount;
 
-            layer.setDebugIndicators(WTF::move(color), width, repaintCount);
-            m_pendingChanges.remove(Change::DebugIndicators);
+            if (committed.changes.contains(Change::Transform)) {
+                layer.setTransform(committed.transform);
+                committed.changes.remove(Change::Transform);
+            }
+
+            if (committed.changes.contains(Change::ChildrenTransform)) {
+                layer.setChildrenTransform(committed.childrenTransform);
+                committed.changes.remove(Change::ChildrenTransform);
+            }
+
+            if (committed.changes.contains(Change::Preserves3D)) {
+                layer.setPreserves3D(committed.preserves3D);
+                committed.changes.remove(Change::Preserves3D);
+            }
+
+            if (committed.changes.contains(Change::MasksToBounds)) {
+                layer.setMasksToBounds(committed.masksToBounds);
+                committed.changes.remove(Change::MasksToBounds);
+            }
+
+            if (committed.changes.contains(Change::BackfaceVisibility)) {
+                layer.setBackfaceVisibility(committed.backfaceVisibility);
+                committed.changes.remove(Change::BackfaceVisibility);
+            }
+
+            if (committed.changes.contains(Change::BackgroundColor)) {
+                layer.setBackgroundColor(committed.backgroundColor);
+                committed.changes.remove(Change::BackgroundColor);
+            }
+
+            if (committed.changes.contains(Change::Opacity)) {
+                layer.setOpacity(committed.opacity);
+                committed.changes.remove(Change::Opacity);
+            }
+
+            if (committed.changes.contains(Change::BlendMode)) {
+                layer.setBlendMode(committed.blendMode);
+                committed.changes.remove(Change::BlendMode);
+            }
+
+            if (committed.changes.contains(Change::BackingStore)) {
+                layer.setUseBackingStore(!!m_backingStoreProxy, m_backingStoreProxy ? m_backingStoreProxy->animatedBackingStoreClient() : nullptr);
+                committed.changes.remove(Change::BackingStore);
+            }
+
+            if (committed.changes.contains(Change::ContentsVisible)) {
+                layer.setContentsVisible(committed.contentsVisible);
+                committed.changes.remove(Change::ContentsVisible);
+            }
+
+            if (committed.changes.contains(Change::ContentsOpaque)) {
+                layer.setContentsOpaque(committed.contentsOpaque);
+                committed.changes.remove(Change::ContentsOpaque);
+            }
+
+            if (committed.changes.contains(Change::ContentsRectClipsDescendants)) {
+                layer.setContentsRectClipsDescendants(committed.contentsRectClipsDescendants);
+                committed.changes.remove(Change::ContentsRectClipsDescendants);
+            }
+
+            if (committed.changes.contains(Change::ContentsTiling)) {
+                layer.setContentsTiling(committed.contentsTileSize, committed.contentsTilePhase);
+                committed.changes.remove(Change::ContentsTiling);
+            }
+
+            if (committed.changes.contains(Change::ContentsColor)) {
+                layer.setContentsSolidColor(committed.contentsColor);
+                committed.changes.remove(Change::ContentsColor);
+            }
+
+            if (committed.changes.contains(Change::ClipPath)) {
+                auto clipPath = *committed.clipPath.path.platformPath();
+                clipPath.setFillType(committed.clipPath.windRule == WindRule::EvenOdd ? SkPathFillType::kEvenOdd : SkPathFillType::kWinding);
+                layer.setClipPath(WTF::move(clipPath));
+                committed.changes.remove(Change::ClipPath);
+            }
+
+            if (committed.changes.contains(Change::Filters)) {
+                layer.setFilters(committed.filters);
+                committed.changes.remove(Change::Filters);
+            }
+
+            if (committed.changes.contains(Change::Mask)) {
+                layer.setMask(committed.mask ? RefPtr { &committed.mask->ensureTarget() } : nullptr);
+                committed.changes.remove(Change::Mask);
+            }
+
+            if (committed.changes.contains(Change::Replica)) {
+                layer.setReplica(committed.replica ? RefPtr { &committed.replica->ensureTarget() } : nullptr);
+                committed.changes.remove(Change::Replica);
+            }
+
+            // FIXME: stop creating a layer for backdrop filters when switching to SkiaCompositingLayer.
+            if (committed.changes.contains(Change::Backdrop)) {
+                if (!committed.backdrop)
+                    layer.setBackdropFilters(FilterOperations());
+                else {
+                    Locker backdropLocker { committed.backdrop->lock() };
+                    layer.setBackdropFilters(committed.backdrop->m_filters);
+                }
+                committed.changes.remove(Change::Backdrop);
+            }
+
+            if (committed.changes.contains(Change::BackdropRect)) {
+                layer.setBackdropFiltersRect(committed.backdropRect);
+                committed.changes.remove(Change::BackdropRect);
+            }
+
+            if (committed.changes.contains(Change::BackdropShapePath)) {
+                if (committed.backdropShapePath.isEmpty())
+                    layer.setBackdropFiltersClipPath(std::nullopt);
+                else {
+                    auto backdropClipPath = *committed.backdropShapePath.platformPath();
+                    backdropClipPath.setFillType(SkPathFillType::kWinding);
+                    layer.setBackdropFiltersClipPath(WTF::move(backdropClipPath));
+                }
+                committed.changes.remove(Change::BackdropShapePath);
+            }
+
+            if (committed.changes.contains(Change::BackdropRoot)) {
+                layer.setIsBackdropRoot(committed.isBackdropRoot);
+                committed.changes.remove(Change::BackdropRoot);
+            }
+
+            if (committed.changes.contains(Change::Animations)) {
+                layer.setAnimations(committed.animations);
+                committed.changes.remove(Change::Animations);
+            }
+
+            if (committed.changes.contains(Change::DebugIndicators)) {
+                Color color;
+                std::optional<float> width;
+                if (committed.debugBorderColor.isVisible()) {
+                    color = committed.debugBorderColor;
+                    width = committed.debugBorderWidth;
+                }
+                std::optional<unsigned> repaintCount;
+                if (committed.repaintCount != -1)
+                    repaintCount = committed.repaintCount;
+
+                layer.setDebugIndicators(WTF::move(color), width, repaintCount);
+                committed.changes.remove(Change::DebugIndicators);
+            }
+
+            if (committed.changes.contains(Change::Children)) {
+                layer.setChildren(WTF::map(committed.children, [](auto& child) {
+                    return Ref { child->ensureTarget() };
+                }));
+                committed.changes.remove(Change::Children);
+            }
+
+            if (m_backingStoreProxy)
+                layer.updateBackingStore(WTF::move(committed.backingStoreUpdate), committed.contentsScale);
         }
 
-        if (m_pendingChanges.contains(Change::Children)) {
-            layer.setChildren(WTF::map(m_children, [](auto& child) {
-                return Ref { child->ensureTarget() };
-            }));
-            m_pendingChanges.remove(Change::Children);
-        }
-
-        if (m_backingStoreProxy)
-            layer.updateBackingStore(m_backingStoreProxy->takePendingUpdate(), m_contentsScale);
-    }
-
-    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
+        if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
 #if ENABLE(DAMAGE_TRACKING)
-        if (m_pendingChanges.contains(Change::Damage)) {
-            ASSERT(m_damage.has_value());
-            layer.addDamage(*std::exchange(m_damage, std::nullopt));
-            m_pendingChanges.remove(Change::Damage);
-        }
+            if (committed.changes.contains(Change::Damage)) {
+                ASSERT(committed.damage.has_value());
+                layer.addDamage(*std::exchange(committed.damage, std::nullopt));
+                committed.changes.remove(Change::Damage);
+            }
 #endif
-        if (m_pendingChanges.contains(Change::ContentsBuffer)) {
-            m_contentsBuffer.hasCommitted = !!m_contentsBuffer.pending;
-            layer.setContentsBuffer(WTF::move(m_contentsBuffer.pending));
-            m_pendingChanges.remove(Change::ContentsBuffer);
+            if (committed.changes.contains(Change::ContentsBuffer)) {
+                layer.setContentsBuffer(WTF::move(committed.contentsBuffer));
+                committed.changes.remove(Change::ContentsBuffer);
+            }
         }
+    }
+
+    if (reasons.contains(CompositionReason::VideoFrame) && isVideoBuffer(m_contentsBuffer.pending.get())) {
+        for (auto& pending : m_commitQueue) {
+            if (pending.changes.contains(Change::ContentsBuffer) && isVideoBuffer(pending.contentsBuffer.get())) {
+                pending.contentsBuffer = nullptr;
+                pending.changes.remove(Change::ContentsBuffer);
+            }
+        }
+        m_contentsBuffer.hasCommitted = !!m_contentsBuffer.pending;
+        layer.setContentsBuffer(WTF::move(m_contentsBuffer.pending));
+        m_pendingChanges.remove(Change::ContentsBuffer);
     }
 }
 #endif

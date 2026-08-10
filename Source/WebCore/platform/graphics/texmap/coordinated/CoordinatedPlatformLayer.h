@@ -27,6 +27,7 @@
 
 #if USE(COORDINATED_GRAPHICS)
 #include "CoordinatedCompositionReason.h"
+#include "CoordinatedBackingStoreProxy.h"
 #include "Damage.h"
 #include "FloatPoint.h"
 #include "FloatPoint3D.h"
@@ -34,6 +35,7 @@
 #include "PlatformLayerIdentifier.h"
 #include "TextureMapperAnimation.h"
 #include "TransformationMatrix.h"
+#include <wtf/Deque.h>
 #include <wtf/EnumSet.h>
 #include <wtf/Lock.h>
 #include <wtf/MainThread.h>
@@ -206,6 +208,7 @@ public:
     void updateBackingStore();
 
     void flushPendingState();
+    void commitState();
     void flushPositionChanges(const OptionSet<CompositionReason>&);
     void flushCompositingState(const OptionSet<CompositionReason>&);
 
@@ -220,6 +223,9 @@ public:
     void willPaintTile();
     void didPaintTile();
     void waitUntilPaintingComplete();
+
+    bool hasPendingContentsBufferForTesting();
+    bool hasQueuedCommitsForTesting();
 
 private:
     explicit CoordinatedPlatformLayer(Client*);
@@ -376,6 +382,52 @@ private:
         std::optional<FloatPoint> boundsOrigin;
         std::optional<FloatPoint> boundsOriginForScrolling;
     } m_pendingState WTF_GUARDED_BY_LOCK(m_lock);
+
+    struct CommitState {
+        EnumSet<Change> changes;
+        FloatPoint3D anchorPoint;
+        FloatSize size;
+        TransformationMatrix transform;
+        TransformationMatrix childrenTransform;
+        bool masksToBounds { false };
+        bool preserves3D { false };
+        bool backfaceVisibility { true };
+        Color backgroundColor;
+        float opacity { 1. };
+        BlendMode blendMode { BlendMode::Normal };
+        bool contentsVisible { true };
+        bool contentsOpaque { false };
+        FloatRect contentsRect;
+        bool contentsRectClipsDescendants { false };
+        FloatRoundedRect contentsClippingRect;
+        Color contentsColor;
+        FloatSize contentsTileSize;
+        FloatSize contentsTilePhase;
+        float contentsScale { 1. };
+        struct {
+            Path path;
+            WindRule windRule;
+        } clipPath;
+        Path contentsClipShapePath;
+        Path backdropShapePath;
+        FilterOperations filters;
+        RefPtr<CoordinatedPlatformLayer> mask;
+        RefPtr<CoordinatedPlatformLayer> replica;
+        RefPtr<CoordinatedPlatformLayer> backdrop;
+        FloatRoundedRect backdropRect;
+        bool isBackdropRoot { false };
+        TextureMapperAnimations animations;
+        Vector<Ref<CoordinatedPlatformLayer>> children;
+        Color debugBorderColor;
+        float debugBorderWidth { 0 };
+        int repaintCount { -1 };
+#if ENABLE(DAMAGE_TRACKING)
+        std::optional<Damage> damage;
+#endif
+        std::unique_ptr<CoordinatedPlatformLayerBuffer> contentsBuffer;
+        CoordinatedBackingStoreProxy::Update backingStoreUpdate;
+    };
+    Deque<CommitState> m_commitQueue WTF_GUARDED_BY_LOCK(m_lock);
 };
 
 } // namespace WebCore

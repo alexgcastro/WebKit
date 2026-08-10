@@ -99,7 +99,7 @@ bool CoordinatedSceneState::flush()
             m_pendingLayersToRemove.addAll(std::exchange(m_layersToRemove, { }));
     }
 
-    flushPendingState();
+    commitState();
 
     return didChangeLayers;
 }
@@ -110,6 +110,16 @@ void CoordinatedSceneState::flushPendingState()
     Locker layersLock { m_layersLock };
     for (Ref layer : m_layers)
         layer->flushPendingState();
+}
+
+void CoordinatedSceneState::commitState()
+{
+    ASSERT(isMainRunLoop());
+    Locker stateLock { m_stateLock };
+    Locker layersLock { m_layersLock };
+    m_rootLayer->commitState();
+    for (Ref layer : m_layers)
+        layer->commitState();
 }
 
 void CoordinatedSceneState::commitPendingLayers()
