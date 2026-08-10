@@ -145,7 +145,7 @@ private:
     bool m_pendingResize { false };
     bool m_pendingForceRepaint { false };
     bool m_waitUntilPaintingComplete { false };
-    bool m_isWaitingForRenderer { false };
+    unsigned m_commitsInFlight { 0 };
     bool m_scheduledWhileWaitingForRenderer { false };
     bool m_forceFrameSync { false };
     bool m_compositionRequired { false };

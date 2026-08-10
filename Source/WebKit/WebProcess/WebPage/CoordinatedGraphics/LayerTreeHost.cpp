@@ -53,6 +53,8 @@
 #include <WebCore/SkiaPaintingEngine.h>
 #include <WebCore/ThreadedScrollingTree.h>
 #include <WebCore/WindowEventLoop.h>
+#include <cstdlib>
+#include <mutex>
 #include <wtf/SetForScope.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -63,6 +65,20 @@ namespace WebKit {
 using namespace WebCore;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(LayerTreeHost);
+
+static unsigned framePipelineDepth()
+{
+    static std::once_flag onceFlag;
+    static unsigned depth = 1;
+    std::call_once(onceFlag, [] {
+        if (const char* envString = getenv("WEBKIT_COORDINATED_FRAME_PIPELINE_DEPTH")) {
+            auto value = strtoul(envString, nullptr, 10);
+            if (value >= 1 && value <= 4)
+                depth = value;
+        }
+    });
+    return depth;
+}
 
 #if ENABLE(DAMAGE_TRACKING)
 static bool damageOverlayForcesPropagation()
@@ -146,12 +162,12 @@ uint64_t LayerTreeHost::surfaceID() const
 
 void LayerTreeHost::scheduleRenderingUpdate()
 {
-    WTFEmitSignpost(this, LayerTreeHostScheduleRenderingUpdate, "isWaitingForRenderer %s", m_isWaitingForRenderer ? "yes" : "no");
+    WTFEmitSignpost(this, LayerTreeHostScheduleRenderingUpdate, "commitsInFlight %u", m_commitsInFlight);
 
     if (m_layerTreeStateIsFrozen || m_isSuspended || m_webPage->size().isEmpty())
         return;
 
-    if (m_isWaitingForRenderer) {
+    if (m_commitsInFlight >= framePipelineDepth()) {
         m_scheduledWhileWaitingForRenderer = true;
         return;
     }
@@ -169,7 +185,7 @@ void LayerTreeHost::scheduleRenderingUpdateRunLoopObserver()
 
 bool LayerTreeHost::canUpdateRendering() const
 {
-    return !m_isWaitingForRenderer;
+    return m_commitsInFlight < framePipelineDepth();
 }
 
 void LayerTreeHost::updateRendering()
@@ -272,7 +288,7 @@ void LayerTreeHost::setViewOverlayRootLayer(GraphicsLayer* graphicsLayer)
 
 void LayerTreeHost::updateRenderingWithForcedRepaint()
 {
-    if (m_isWaitingForRenderer) {
+    if (m_commitsInFlight) {
         if (m_forcedRepaintAsyncCallback)
             m_pendingForceRepaint = true;
         return;
@@ -309,7 +325,7 @@ bool LayerTreeHost::ensureDrawing()
 void LayerTreeHost::sizeDidChange()
 {
     m_pendingResize = true;
-    if (m_isWaitingForRenderer)
+    if (m_commitsInFlight)
         scheduleRenderingUpdate();
     else
         updateRendering();
@@ -405,6 +421,12 @@ void LayerTreeHost::willPaintTile()
     m_sceneState->willPaintTile();
 }
 
+void LayerTreeHost::didPaintTile()
+{
+    m_sceneState->didPaintTile();
+    m_compositor->pendingTilesDidChange();
+}
+
 void LayerTreeHost::committedTileBufferWillPaint(unsigned sequence)
 {
     m_sceneState->willPaintCommittedTile(sequence);
@@ -413,12 +435,6 @@ void LayerTreeHost::committedTileBufferWillPaint(unsigned sequence)
 void LayerTreeHost::committedTileBufferPainted(unsigned sequence)
 {
     m_sceneState->didPaintCommittedTile(sequence);
-    m_compositor->pendingTilesDidChange();
-}
-
-void LayerTreeHost::didPaintTile()
-{
-    m_sceneState->didPaintTile();
     m_compositor->pendingTilesDidChange();
 }
 
@@ -459,21 +475,22 @@ void LayerTreeHost::didRenderFrame()
 
 void LayerTreeHost::requestCompositionForRenderingUpdate()
 {
-    m_isWaitingForRenderer = true;
+    ++m_commitsInFlight;
     m_compositor->requestCompositionForRenderingUpdate([this] {
         WTFBeginSignpost(this, DidComposite);
 
         if (!m_pendingForceRepaint && m_forcedRepaintAsyncCallback)
             m_forcedRepaintAsyncCallback();
 
-        m_isWaitingForRenderer = false;
+        ASSERT(m_commitsInFlight);
+        --m_commitsInFlight;
         bool scheduledWhileWaitingForRenderer = std::exchange(m_scheduledWhileWaitingForRenderer, false);
-        if (m_pendingForceRepaint) {
+        if (m_pendingForceRepaint && !m_commitsInFlight) {
             if (!m_layerTreeStateIsFrozen)
                 updateRenderingWithForcedRepaint();
             else if (m_forcedRepaintAsyncCallback)
                 m_forcedRepaintAsyncCallback();
-        } else if (!m_isSuspended && !m_layerTreeStateIsFrozen && scheduledWhileWaitingForRenderer)
+        } else if (!m_pendingForceRepaint && !m_isSuspended && !m_layerTreeStateIsFrozen && scheduledWhileWaitingForRenderer)
             scheduleRenderingUpdateRunLoopObserver();
 
         WTFEndSignpost(this, DidComposite);
@@ -550,7 +567,7 @@ void LayerTreeHost::adjustTransientZoom(double scale, FloatPoint origin, FloatPo
 
     applyTransientZoomToLayers(m_transientZoomScale, m_transientZoomOrigin);
 
-    if (m_isWaitingForRenderer)
+    if (m_commitsInFlight)
         scheduleRenderingUpdate();
     else
         updateRendering();
