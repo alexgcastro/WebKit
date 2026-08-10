@@ -28,6 +28,7 @@
 #if USE(COORDINATED_GRAPHICS)
 #include <WebCore/CoordinatedCompositionReason.h>
 #include <atomic>
+#include <wtf/Deque.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
 #include <wtf/ThreadSafeRefCounted.h>
@@ -55,6 +56,7 @@ public:
 
     bool flush();
     void flushPendingState();
+    void commitState();
     void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
     void invalidate();
 

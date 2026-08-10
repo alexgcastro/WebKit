@@ -70,7 +70,8 @@ void SkiaBackingStore::update(const FloatSize& size, float scale, CoordinatedBac
 
     for (const auto& tileUpdate : update.tilesToUpdate()) {
         auto it = m_tiles.find(tileUpdate.tileID);
-        ASSERT(it != m_tiles.end());
+        if (it == m_tiles.end())
+            continue;
         it->value.scheduleUpdate(tileUpdate.dirtyRect, tileUpdate.tileRect, tileUpdate.buffer);
         m_hasPendingTileUpdates = true;
     }
