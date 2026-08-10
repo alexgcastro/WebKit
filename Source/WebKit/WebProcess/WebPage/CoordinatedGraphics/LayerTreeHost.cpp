@@ -219,6 +219,7 @@ void LayerTreeHost::updateRendering()
         drawingArea->dispatchPendingCallbacksAfterEnsuringDrawing();
 
     bool didChangeSceneState = m_sceneState->flush();
+    m_compositor->sceneCommitDidEnd();
     if (m_compositionRequired || m_pendingResize || m_forceFrameSync || didChangeSceneState)
         requestCompositionForRenderingUpdate();
 
@@ -404,6 +405,17 @@ void LayerTreeHost::willPaintTile()
     m_sceneState->willPaintTile();
 }
 
+void LayerTreeHost::committedTileBufferWillPaint(unsigned sequence)
+{
+    m_sceneState->willPaintCommittedTile(sequence);
+}
+
+void LayerTreeHost::committedTileBufferPainted(unsigned sequence)
+{
+    m_sceneState->didPaintCommittedTile(sequence);
+    m_compositor->pendingTilesDidChange();
+}
+
 void LayerTreeHost::didPaintTile()
 {
     m_sceneState->didPaintTile();
@@ -465,7 +477,7 @@ void LayerTreeHost::requestCompositionForRenderingUpdate()
             scheduleRenderingUpdateRunLoopObserver();
 
         WTFEndSignpost(this, DidComposite);
-    });
+    }, m_sceneState->lastCommitSequence());
     WTFEmitSignpost(this, RequestCompositionForRenderingUpdate);
 }
 

@@ -57,7 +57,7 @@ public:
     bool flush();
     void flushPendingState();
     void commitState();
-    void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+    void flushCompositingState(const OptionSet<WebCore::CompositionReason>&, unsigned maxReadySequence);
     void invalidate();
 
     void invalidateCommittedLayers();
@@ -69,6 +69,10 @@ public:
     void willPaintTile();
     void didPaintTile();
     unsigned pendingTiles() const { return m_pendingTiles.load(); }
+    void willPaintCommittedTile(unsigned sequence);
+    void didPaintCommittedTile(unsigned sequence);
+    unsigned maxReadySequence();
+    unsigned lastCommitSequence() const { return m_lastCommitSequence.load(); }
 
 private:
     CoordinatedSceneState();
@@ -85,6 +89,9 @@ private:
     std::atomic<bool> m_didChangeLayers { false };
     HashSet<Ref<WebCore::CoordinatedPlatformLayer>> m_committedLayers;
     std::atomic<unsigned> m_pendingTiles { 0 };
+    std::atomic<unsigned> m_lastCommitSequence { 0 };
+    Lock m_generationsLock;
+    Deque<std::pair<unsigned, unsigned>> m_generations WTF_GUARDED_BY_LOCK(m_generationsLock);
     Lock m_stateLock;
 };
 

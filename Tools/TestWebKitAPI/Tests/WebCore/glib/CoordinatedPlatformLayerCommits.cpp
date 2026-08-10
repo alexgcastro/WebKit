@@ -74,7 +74,7 @@ TEST(CoordinatedPlatformLayerCommits, VideoFrameCompositeDoesNotConsumeUncommitt
     EXPECT_TRUE(layer->hasPendingContentsBufferForTesting());
 
     runOnCompositorThread([&] {
-        layer->flushCompositingState({ CompositionReason::VideoFrame });
+        layer->flushCompositingState({ CompositionReason::VideoFrame }, 1);
         layer->invalidateTarget();
     });
 
@@ -90,12 +90,12 @@ TEST(CoordinatedPlatformLayerCommits, RenderingUpdateCompositeConsumesCommittedC
         layer->setContentsBuffer(makeUnique<TestContentsBuffer>(), std::nullopt, CoordinatedPlatformLayer::RequireComposition::No);
     }
 
-    layer->commitState();
+    layer->commitState(1);
     EXPECT_FALSE(layer->hasPendingContentsBufferForTesting());
     EXPECT_TRUE(layer->hasQueuedCommitsForTesting());
 
     runOnCompositorThread([&] {
-        layer->flushCompositingState({ CompositionReason::RenderingUpdate });
+        layer->flushCompositingState({ CompositionReason::RenderingUpdate }, 1);
         layer->invalidateTarget();
     });
 

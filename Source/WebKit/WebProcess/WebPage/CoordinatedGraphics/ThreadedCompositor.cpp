@@ -153,7 +153,8 @@ void ThreadedCompositor::invalidate()
     {
         Locker locker { m_state.lock };
         stopRenderTimer();
-        m_state.didCompositeRenderingUpdateFunction = nullptr;
+        m_state.didCompositeRenderingUpdateFunctions.clear();
+        m_state.didCompositeRenderingUpdateFunctionsToNotify.clear();
         m_state.state = State::Invalidated;
     }
 
@@ -165,7 +166,7 @@ void ThreadedCompositor::invalidate()
 #endif
 
         // Update the scene at this point ensures the layers state are correctly propagated.
-        flushCompositingState(CompositionReason::RenderingUpdate);
+        flushCompositingState(CompositionReason::RenderingUpdate, m_sceneState->lastCommitSequence());
 
         m_sceneState->invalidateCommittedLayers();
 #if USE(TEXTURE_MAPPER)
@@ -274,16 +275,21 @@ void ThreadedCompositor::preferredBufferFormatsDidChange()
 }
 #endif
 
+void ThreadedCompositor::sceneCommitDidEnd()
+{
+    ASSERT(RunLoop::isMain());
+    Locker locker { m_state.lock };
+    if (!m_state.reasons.isEmpty())
+        scheduleUpdateLocked();
+}
+
 void ThreadedCompositor::pendingTilesDidChange()
 {
     Locker locker { m_state.lock };
-    if (!m_state.isWaitingForTiles)
+    if (m_state.didCompositeRenderingUpdateFunctions.isEmpty())
         return;
-
-    if (m_sceneState->pendingTiles())
+    if (m_sceneState->maxReadySequence() < m_state.didCompositeRenderingUpdateFunctions.first().first)
         return;
-
-    m_state.isWaitingForTiles = false;
     scheduleUpdateLocked();
 }
 
@@ -336,7 +342,7 @@ void ThreadedCompositor::enableFrameDamageNotificationForTesting()
 }
 #endif
 
-void ThreadedCompositor::flushCompositingState(const OptionSet<CompositionReason>& reasons)
+void ThreadedCompositor::flushCompositingState(const OptionSet<CompositionReason>& reasons, unsigned maxReadySequence)
 {
     if (reasons.hasExactlyOneBitSet() && reasons.contains(CompositionReason::Animation))
         return;
@@ -348,7 +354,7 @@ void ThreadedCompositor::flushCompositingState(const OptionSet<CompositionReason
     }
 #endif
 
-    m_sceneState->flushCompositingState(reasons);
+    m_sceneState->flushCompositingState(reasons, maxReadySequence);
 }
 
 TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
@@ -558,6 +564,8 @@ void ThreadedCompositor::renderLayerTree()
 
     OptionSet<CompositionReason> reasons;
     bool shouldNotifiyDidComposite = false;
+    unsigned maxReadySequence = 0;
+    unsigned movedHandlers = 0;
     {
         Locker locker { m_state.lock };
 
@@ -571,11 +579,23 @@ void ThreadedCompositor::renderLayerTree()
         m_state.isRenderTimerActive = false;
         reasons = std::exchange(m_state.reasons, { });
         if (reasons.contains(CompositionReason::RenderingUpdate)) {
-            if (m_state.isWaitingForTiles) {
-                reasons.remove(CompositionReason::RenderingUpdate);
+            maxReadySequence = m_sceneState->maxReadySequence();
+            if (!m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().first <= maxReadySequence) {
+                m_state.didCompositeRenderingUpdateFunctionsToNotify.append(m_state.didCompositeRenderingUpdateFunctions.takeFirst().second);
+                movedHandlers++;
+            }
+            shouldNotifiyDidComposite = !m_state.didCompositeRenderingUpdateFunctionsToNotify.isEmpty();
+            if (!m_state.didCompositeRenderingUpdateFunctions.isEmpty())
                 m_state.reasons.add(CompositionReason::RenderingUpdate);
-            } else
-                shouldNotifiyDidComposite = !!m_state.didCompositeRenderingUpdateFunction;
+
+            // If the only work is a rendering update whose commit is not ready yet, defer the whole
+            // composite: painting now would re-present unchanged content. didPaintCommittedTile()
+            // schedules a new composite when the commit becomes ready.
+            if (!movedHandlers && !m_state.didCompositeRenderingUpdateFunctions.isEmpty() && reasons.hasExactlyOneBitSet()) {
+                ASSERT(m_state.state == State::Scheduled);
+                m_state.state = State::Idle;
+                return;
+            }
         }
 
         ASSERT(m_state.state == State::Scheduled);
@@ -610,7 +630,7 @@ void ThreadedCompositor::renderLayerTree()
     });
 
     WTFBeginSignpost(this, FlushCompositingState);
-    flushCompositingState(reasons);
+    flushCompositingState(reasons, maxReadySequence);
     WTFEndSignpost(this, FlushCompositingState);
 
     WTFBeginSignpost(this, PaintToGLContext);
@@ -640,15 +660,12 @@ void ThreadedCompositor::renderLayerTree()
     });
 }
 
-void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&& didCompositeFunction)
+void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&& didCompositeFunction, unsigned sequence)
 {
     ASSERT(RunLoop::isMain());
     Locker locker { m_state.lock };
     m_state.reasons.add(CompositionReason::RenderingUpdate);
-    ASSERT(!m_state.didCompositeRenderingUpdateFunction);
-    m_state.didCompositeRenderingUpdateFunction = WTF::move(didCompositeFunction);
-    if (m_sceneState->pendingTiles())
-        m_state.isWaitingForTiles = true;
+    m_state.didCompositeRenderingUpdateFunctions.append({ sequence, WTF::move(didCompositeFunction) });
     scheduleUpdateLocked();
 }
 
@@ -713,9 +730,11 @@ void ThreadedCompositor::frameComplete()
     case State::Invalidated:
         break;
     case State::InProgress:
-        if (m_state.reasons.contains(CompositionReason::RenderingUpdate) && m_state.isWaitingForTiles)
+        if (m_state.reasons.contains(CompositionReason::RenderingUpdate) && !m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().first <= m_sceneState->maxReadySequence()) {
             m_state.state = State::Scheduled;
-        else
+            if (!m_suspendedCount.load())
+                startRenderTimer();
+        } else
             m_state.state = State::Idle;
         break;
     case State::ScheduledWhileInProgress:
@@ -734,13 +753,13 @@ RunLoop* ThreadedCompositor::runLoop()
 void ThreadedCompositor::didCompositeRunLoopObserverFired()
 {
     m_didCompositeRunLoopObserver->invalidate();
-    Function<void()> didCompositeFunction;
+    Deque<Function<void()>> didCompositeFunctions;
     {
         Locker locker { m_state.lock };
-        didCompositeFunction = std::exchange(m_state.didCompositeRenderingUpdateFunction, nullptr);
+        didCompositeFunctions = std::exchange(m_state.didCompositeRenderingUpdateFunctionsToNotify, { });
     }
-    if (didCompositeFunction)
-        didCompositeFunction();
+    for (auto& function : didCompositeFunctions)
+        function();
 }
 
 void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float deviceScaleFactor)
