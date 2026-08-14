@@ -5641,9 +5641,9 @@ void WebPage::layoutIfNeeded()
     protect(corePage())->layoutIfNeeded();
 }
 
-void WebPage::updateRendering()
+void WebPage::updateRendering(std::optional<MonotonicTime> timestamp)
 {
-    protect(corePage())->updateRendering();
+    protect(corePage())->updateRendering(timestamp);
 
 #if PLATFORM(IOS_FAMILY)
     if (auto pendingUpdate = std::exchange(m_pendingFocusedElementUpdate, { }))

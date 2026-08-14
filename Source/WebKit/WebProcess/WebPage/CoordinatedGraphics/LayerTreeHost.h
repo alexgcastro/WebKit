@@ -36,6 +36,7 @@
 #include <WebCore/GraphicsLayerClient.h>
 #include <WebCore/GraphicsLayerFactory.h>
 #include <WebCore/PlatformScreen.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/CheckedRef.h>
 #include <wtf/CompletionHandler.h>
 #include <wtf/Forward.h>
@@ -146,6 +147,7 @@ private:
     bool m_pendingForceRepaint { false };
     bool m_waitUntilPaintingComplete { false };
     unsigned m_commitsInFlight { 0 };
+    std::optional<MonotonicTime> m_currentCommitAnimationTimestamp;
     bool m_scheduledWhileWaitingForRenderer { false };
     bool m_forceFrameSync { false };
     bool m_compositionRequired { false };

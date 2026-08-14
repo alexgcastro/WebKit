@@ -123,7 +123,7 @@ public:
     // it is collected first in a walk that draws nothing, before the walk that draws. The draw is limited
     // to the region the target must redraw - the target's prior owed damage combined with this frame's - and
     // no prior damage repaints the whole target. Returns whether any animation is still running.
-    bool paint(SkCanvas&, std::optional<Damage>& frameDamage, const std::optional<Damage>& priorTargetDamage = std::nullopt, std::optional<SkColor> clearColor = std::nullopt);
+    bool paint(SkCanvas&, std::optional<Damage>& frameDamage, const std::optional<Damage>& priorTargetDamage = std::nullopt, std::optional<SkColor> clearColor = std::nullopt, std::optional<MonotonicTime> animationSampleTime = std::nullopt);
 
 private:
     using ScopedFlush = SkiaCompositingLayerImageSetBatch::ScopedFlush;

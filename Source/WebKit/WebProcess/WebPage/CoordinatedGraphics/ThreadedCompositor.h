@@ -91,7 +91,7 @@ public:
     void pendingTilesDidChange();
 
     void setSize(const WebCore::IntSize&, float);
-    void requestCompositionForRenderingUpdate(Function<void()>&&, unsigned sequence);
+    void requestCompositionForRenderingUpdate(Function<void(MonotonicTime)>&&, unsigned sequence, std::optional<MonotonicTime> animationTimestamp);
     void sceneCommitDidEnd();
     void requestComposition(WebCore::CompositionReason);
     RunLoop* runLoop();
@@ -141,6 +141,7 @@ private:
     void frameComplete();
 
     void didCompositeRunLoopObserverFired();
+    std::optional<MonotonicTime> currentAnimationSampleTime() const;
 
     void updateSceneAttributes(const WebCore::IntSize&, float deviceScaleFactor);
 
@@ -186,8 +187,13 @@ private:
         bool isRenderTimerActive WTF_GUARDED_BY_LOCK(lock) { false };
         bool isWaitingForTiles WTF_GUARDED_BY_LOCK(lock) { false };
         OptionSet<WebCore::CompositionReason> reasons WTF_GUARDED_BY_LOCK(lock);
-        Deque<std::pair<unsigned, Function<void()>>> didCompositeRenderingUpdateFunctions WTF_GUARDED_BY_LOCK(lock);
-        Deque<Function<void()>> didCompositeRenderingUpdateFunctionsToNotify WTF_GUARDED_BY_LOCK(lock);
+        struct DidCompositeEntry {
+            unsigned sequence { 0 };
+            std::optional<MonotonicTime> animationTimestamp;
+            Function<void(MonotonicTime)> function;
+        };
+        Deque<DidCompositeEntry> didCompositeRenderingUpdateFunctions WTF_GUARDED_BY_LOCK(lock);
+        Deque<std::pair<MonotonicTime, Function<void(MonotonicTime)>>> didCompositeRenderingUpdateFunctionsToNotify WTF_GUARDED_BY_LOCK(lock);
     } m_state;
 
     struct {
@@ -232,6 +238,8 @@ private:
 #endif
 
     std::unique_ptr<WebCore::RunLoopObserver> m_didCompositeRunLoopObserver;
+    std::optional<MonotonicTime> m_animationTimestampAnchor;
+    MonotonicTime m_animationTimestampAnchorWallTime;
 };
 
 } // namespace WebKit

@@ -288,7 +288,7 @@ void ThreadedCompositor::pendingTilesDidChange()
     Locker locker { m_state.lock };
     if (m_state.didCompositeRenderingUpdateFunctions.isEmpty())
         return;
-    if (m_sceneState->maxReadySequence() < m_state.didCompositeRenderingUpdateFunctions.first().first)
+    if (m_sceneState->maxReadySequence() < m_state.didCompositeRenderingUpdateFunctions.first().sequence)
         return;
     scheduleUpdateLocked();
 }
@@ -375,7 +375,7 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
     if (currentRootLayer.transform() != matrix)
         currentRootLayer.setTransform(matrix);
 
-    bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
+    bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(currentAnimationSampleTime().value_or(MonotonicTime::now()));
 
     m_textureMapper->beginPainting(m_flipY ? TextureMapper::FlipY::Yes : TextureMapper::FlipY::No);
     m_textureMapper->beginClip(TransformationMatrix(), FloatRoundedRect(clipRect));
@@ -486,7 +486,7 @@ TargetContents ThreadedCompositor::paintToSkiaCanvas(const TransformationMatrix&
 #endif
 
     canvas->save();
-    const bool hasRunningAnimations = rootLayer.paint(*canvas, frameDamage, priorTargetDamage, clearColor);
+    const bool hasRunningAnimations = rootLayer.paint(*canvas, frameDamage, priorTargetDamage, clearColor, currentAnimationSampleTime());
     canvas->restore();
 
 #if ENABLE(DAMAGE_TRACKING)
@@ -551,6 +551,13 @@ static String reasonsToString(const OptionSet<CompositionReason>& reasons)
 }
 #endif
 
+std::optional<MonotonicTime> ThreadedCompositor::currentAnimationSampleTime() const
+{
+    if (!m_animationTimestampAnchor)
+        return std::nullopt;
+    return *m_animationTimestampAnchor + (MonotonicTime::now() - m_animationTimestampAnchorWallTime);
+}
+
 void ThreadedCompositor::renderLayerTree()
 {
     ASSERT(m_sceneState);
@@ -580,8 +587,31 @@ void ThreadedCompositor::renderLayerTree()
         reasons = std::exchange(m_state.reasons, { });
         if (reasons.contains(CompositionReason::RenderingUpdate)) {
             maxReadySequence = m_sceneState->maxReadySequence();
-            if (!m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().first <= maxReadySequence) {
-                m_state.didCompositeRenderingUpdateFunctionsToNotify.append(m_state.didCompositeRenderingUpdateFunctions.takeFirst().second);
+            std::optional<MonotonicTime> newestAppliedTimestamp;
+            for (const auto& entry : m_state.didCompositeRenderingUpdateFunctions) {
+                if (entry.sequence > maxReadySequence)
+                    break;
+                if (entry.animationTimestamp)
+                    newestAppliedTimestamp = entry.animationTimestamp;
+            }
+            if (newestAppliedTimestamp) {
+                auto now = MonotonicTime::now();
+                if (!m_animationTimestampAnchor)
+                    m_animationTimestampAnchor = *newestAppliedTimestamp;
+                else {
+                    // Keep the sampling clock advancing at wall rate and only slew it toward the
+                    // commit timeline, so a late commit's irregular timestamp cannot make
+                    // compositor-driven animations jump; the transient offset opened by a
+                    // main-thread stall closes over a few dozen frames instead.
+                    auto extrapolated = *m_animationTimestampAnchor + (now - m_animationTimestampAnchorWallTime);
+                    auto error = *newestAppliedTimestamp - extrapolated;
+                    static constexpr Seconds maxCorrectionPerComposite { 0.002 };
+                    m_animationTimestampAnchor = extrapolated + std::clamp(error, -maxCorrectionPerComposite, maxCorrectionPerComposite);
+                }
+                m_animationTimestampAnchorWallTime = now;
+            }
+            if (!m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().sequence <= maxReadySequence) {
+                m_state.didCompositeRenderingUpdateFunctionsToNotify.append({ MonotonicTime::now(), m_state.didCompositeRenderingUpdateFunctions.takeFirst().function });
                 movedHandlers++;
             }
             shouldNotifiyDidComposite = !m_state.didCompositeRenderingUpdateFunctionsToNotify.isEmpty();
@@ -660,12 +690,12 @@ void ThreadedCompositor::renderLayerTree()
     });
 }
 
-void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&& didCompositeFunction, unsigned sequence)
+void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void(MonotonicTime)>&& didCompositeFunction, unsigned sequence, std::optional<MonotonicTime> animationTimestamp)
 {
     ASSERT(RunLoop::isMain());
     Locker locker { m_state.lock };
     m_state.reasons.add(CompositionReason::RenderingUpdate);
-    m_state.didCompositeRenderingUpdateFunctions.append({ sequence, WTF::move(didCompositeFunction) });
+    m_state.didCompositeRenderingUpdateFunctions.append({ sequence, animationTimestamp, WTF::move(didCompositeFunction) });
     scheduleUpdateLocked();
 }
 
@@ -730,7 +760,7 @@ void ThreadedCompositor::frameComplete()
     case State::Invalidated:
         break;
     case State::InProgress:
-        if (m_state.reasons.contains(CompositionReason::RenderingUpdate) && !m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().first <= m_sceneState->maxReadySequence()) {
+        if (m_state.reasons.contains(CompositionReason::RenderingUpdate) && !m_state.didCompositeRenderingUpdateFunctions.isEmpty() && m_state.didCompositeRenderingUpdateFunctions.first().sequence <= m_sceneState->maxReadySequence()) {
             m_state.state = State::Scheduled;
             if (!m_suspendedCount.load())
                 startRenderTimer();
@@ -753,13 +783,13 @@ RunLoop* ThreadedCompositor::runLoop()
 void ThreadedCompositor::didCompositeRunLoopObserverFired()
 {
     m_didCompositeRunLoopObserver->invalidate();
-    Deque<Function<void()>> didCompositeFunctions;
+    Deque<std::pair<MonotonicTime, Function<void(MonotonicTime)>>> didCompositeFunctions;
     {
         Locker locker { m_state.lock };
         didCompositeFunctions = std::exchange(m_state.didCompositeRenderingUpdateFunctionsToNotify, { });
     }
-    for (auto& function : didCompositeFunctions)
-        function();
+    for (auto& [compositeTimestamp, function] : didCompositeFunctions)
+        function(compositeTimestamp);
 }
 
 void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float deviceScaleFactor)
