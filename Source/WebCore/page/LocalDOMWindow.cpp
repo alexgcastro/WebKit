@@ -838,9 +838,9 @@ ReducedResolutionSeconds LocalDOMWindow::nowTimestamp() const
     return protect(performance())->nowInReducedResolutionSeconds();
 }
 
-void LocalDOMWindow::freezeNowTimestamp()
+void LocalDOMWindow::freezeNowTimestamp(std::optional<MonotonicTime> timestamp)
 {
-    m_frozenNowTimestamp = nowTimestamp();
+    m_frozenNowTimestamp = timestamp ? protect(performance())->relativeTimeFromTimeOriginInReducedResolutionSeconds(*timestamp) : nowTimestamp();
 }
 
 void LocalDOMWindow::unfreezeNowTimestamp()

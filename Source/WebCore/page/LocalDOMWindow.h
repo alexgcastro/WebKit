@@ -324,7 +324,7 @@ public:
     Performance& performance() const;
 
     WEBCORE_EXPORT ReducedResolutionSeconds nowTimestamp() const;
-    void freezeNowTimestamp();
+    void freezeNowTimestamp(std::optional<MonotonicTime> = std::nullopt);
     void NODELETE unfreezeNowTimestamp();
     ReducedResolutionSeconds frozenNowTimestamp() const;
 

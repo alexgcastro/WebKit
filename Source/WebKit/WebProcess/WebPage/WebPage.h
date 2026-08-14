@@ -705,7 +705,7 @@ public:
 #endif
 
     void layoutIfNeeded();
-    void updateRendering();
+    void updateRendering(std::optional<MonotonicTime> timestamp = std::nullopt);
     bool NODELETE hasRootFrames();
     String rootFrameOriginString();
     bool NODELETE shouldTriggerRenderingUpdate(unsigned rescheduledRenderingUpdateCount) const;

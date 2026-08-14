@@ -201,7 +201,15 @@ void LayerTreeHost::updateRendering()
     TraceScope traceScope(LayerTreeHostRenderingUpdateStart, LayerTreeHostRenderingUpdateEnd);
 
     Ref page = m_webPage;
-    page->updateRendering();
+    std::optional<MonotonicTime> renderingUpdateTimestamp;
+    if (framePipelineDepth() > 1) {
+        // Freeze the page clock at the real update time and record it in the commit; the
+        // compositor sampling anchor's bounded slew absorbs the scheduling jitter. A
+        // synthesized uniform timeline would leak into the page-visible performance.now().
+        renderingUpdateTimestamp = MonotonicTime::now();
+    }
+    m_currentCommitAnimationTimestamp = renderingUpdateTimestamp;
+    page->updateRendering(renderingUpdateTimestamp);
     page->flushPendingEditorStateUpdate();
     page->flushPendingThemeColorChange();
 
@@ -476,7 +484,7 @@ void LayerTreeHost::didRenderFrame()
 void LayerTreeHost::requestCompositionForRenderingUpdate()
 {
     ++m_commitsInFlight;
-    m_compositor->requestCompositionForRenderingUpdate([this] {
+    m_compositor->requestCompositionForRenderingUpdate([this](MonotonicTime) {
         WTFBeginSignpost(this, DidComposite);
 
         if (!m_pendingForceRepaint && m_forcedRepaintAsyncCallback)
@@ -494,7 +502,7 @@ void LayerTreeHost::requestCompositionForRenderingUpdate()
             scheduleRenderingUpdateRunLoopObserver();
 
         WTFEndSignpost(this, DidComposite);
-    }, m_sceneState->lastCommitSequence());
+    }, m_sceneState->lastCommitSequence(), m_currentCommitAnimationTimestamp);
     WTFEmitSignpost(this, RequestCompositionForRenderingUpdate);
 }
 

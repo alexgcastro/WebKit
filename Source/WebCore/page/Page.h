@@ -843,7 +843,7 @@ public:
     WEBCORE_EXPORT void removeActivityStateChangeObserver(ActivityStateChangeObserver&);
 
     WEBCORE_EXPORT void layoutIfNeeded(OptionSet<LayoutOptions> = { });
-    WEBCORE_EXPORT void updateRendering();
+    WEBCORE_EXPORT void updateRendering(std::optional<MonotonicTime> timestamp = std::nullopt);
     // A call to updateRendering() that is not followed by a call to finalizeRenderingUpdate().
     WEBCORE_EXPORT void isolatedUpdateRendering();
     // Called when the rendering update steps are complete, but before painting.

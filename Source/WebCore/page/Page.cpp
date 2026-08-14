@@ -2355,7 +2355,7 @@ void Page::syncLocalFrameInfoToRemote()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering
-void Page::updateRendering()
+void Page::updateRendering(std::optional<MonotonicTime> timestamp)
 {
     LOG(EventLoop, "Page %p updateRendering() - re-entering %d", this, !m_renderingUpdateRemainingSteps.isEmpty());
 
@@ -2372,7 +2372,7 @@ void Page::updateRendering()
         return;
     }
 
-    m_lastRenderingUpdateTimestamp = MonotonicTime::now();
+    m_lastRenderingUpdateTimestamp = timestamp.value_or(MonotonicTime::now());
     m_renderingUpdateIsScheduled = false;
 
     bool isSVGImagePage = chrome().client().isSVGImageChromeClient();
@@ -2398,8 +2398,8 @@ void Page::updateRendering()
 
     // Timestamps should not change while serving the rendering update steps.
     Vector<WeakPtr<Document, WeakPtrImplWithEventTargetData>> initialDocuments;
-    forEachDocument([&initialDocuments] (Document& document) {
-        protect(document.window())->freezeNowTimestamp();
+    forEachDocument([&initialDocuments, timestamp] (Document& document) {
+        protect(document.window())->freezeNowTimestamp(timestamp);
         initialDocuments.append(document);
     });
 

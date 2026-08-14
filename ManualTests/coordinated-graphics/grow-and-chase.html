@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grow &amp; chase - HTML div</title>
+<style>
+  :root {
+    --mover-w: 120px;
+    --dur: 4s;
+    --row-h: 200px;
+
+    --bg: #10131a;
+    --hud-bg: #171c25;
+    --stage-bg: #1b202b;
+    --line: #2b3240;
+    --fg: #e6e9ef;
+    --dim: #98a1b2;
+    --grow-fill: #3d6fd8;
+    --move-fill: #f0a020;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* ---------------- HUD ---------------- */
+
+  .hud {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 18px;
+    padding: 10px 14px;
+    background: var(--hud-bg);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .hud button {
+    font: inherit;
+    color: var(--fg);
+    background: #232a36;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  .hud button:hover { background: #2c3543; }
+
+  .hud label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+
+  .hud input[type=range] { width: 120px; vertical-align: middle; }
+
+  .warn { color: #f0a020; }
+
+  .note {
+    padding: 6px 14px;
+    color: var(--dim);
+    font-size: 11px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* ---------------- stage ---------------- */
+
+  .stage {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: var(--row-h);
+    overflow: hidden;
+    background: var(--stage-bg);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tag {
+    position: absolute;
+    left: 10px;
+    top: 8px;
+    z-index: 2;
+    pointer-events: none;
+    color: #fff;
+    text-shadow: 0 1px 3px #000a;
+    font-size: 12px;
+    letter-spacing: .04em;
+  }
+
+  .grower,
+  .mover {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: var(--row-h);
+  }
+  .grower { width: 0; background: var(--grow-fill); }
+  .mover  { width: var(--mover-w); background: var(--move-fill); }
+
+  /* ---------------- the animation ----------------
+     The grower runs 0 -> --travel, the mover translates 0 -> --travel.
+     --travel is (stage width - mover width), so the mover's left edge sits
+     exactly on the grower's right edge, and at the end of the sweep the pair
+     covers the stage edge to edge. alternate + infinite gives the
+     left-to-right, then right-to-left ping-pong.                          */
+
+  @keyframes grow  { from { width: 0; }                 to { width: var(--travel, 0px); } }
+  @keyframes chase { from { transform: translateX(0); } to { transform: translateX(var(--travel, 0px)); } }
+
+  .grower { animation: grow  var(--dur) linear infinite alternate; }
+  .mover  { animation: chase var(--dur) linear infinite alternate; }
+
+  .paused .grower,
+  .paused .mover { animation-play-state: paused; }
+</style>
+</head>
+<body>
+
+<div class="hud">
+  <button id="toggle">Pause</button>
+
+  <label>sweep
+    <input type="range" id="dur" min="0.5" max="10" step="0.5" value="4">
+    <span id="durOut">4.0s</span>
+  </label>
+
+  <label>chaser
+    <input type="range" id="moverW" min="20" max="400" step="10" value="120">
+    <span id="moverOut">120px</span>
+  </label>
+
+  <label>main-thread load
+    <input type="range" id="load" min="0" max="200" step="5" value="0">
+    <span id="loadOut">0ms</span>
+  </label>
+
+</div>
+
+<div class="note" id="geom"></div>
+
+<div class="stage">
+  <div class="tag">HTML &lt;div&gt; - CSS animated width + translateX</div>
+  <div class="grower"></div>
+  <div class="mover"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var root = document.documentElement;
+  var geom = document.getElementById("geom");
+
+  var moverWidth = 120;
+
+  // --travel = stage width - chaser width, so grower and chaser stay locked
+  // together and the pair ends flush with the right edge of the stage.
+  function updateTravel() {
+    var w = document.documentElement.clientWidth;
+    var travel = Math.max(0, w - moverWidth);
+    root.style.setProperty("--travel", travel + "px");
+    root.style.setProperty("--mover-w", moverWidth + "px");
+    geom.textContent = "stage " + w + "px  |  chaser " + moverWidth +
+      "px  |  travel " + travel + "px  |  row height 200px  |  space = pause/run";
+  }
+
+  window.addEventListener("resize", updateTravel);
+  updateTravel();
+
+  /* ---------------- controls ---------------- */
+
+  var toggle = document.getElementById("toggle");
+
+  function setPaused(paused) {
+    root.classList.toggle("paused", paused);
+    toggle.textContent = paused ? "Run" : "Pause";
+  }
+
+  toggle.addEventListener("click", function () {
+    setPaused(!root.classList.contains("paused"));
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "Space" && e.target === document.body) {
+      e.preventDefault();
+      setPaused(!root.classList.contains("paused"));
+    }
+  });
+
+  var durOut = document.getElementById("durOut");
+  document.getElementById("dur").addEventListener("input", function (e) {
+    var v = parseFloat(e.target.value);
+    root.style.setProperty("--dur", v + "s");
+    durOut.textContent = v.toFixed(1) + "s";
+  });
+
+  var moverOut = document.getElementById("moverOut");
+  document.getElementById("moverW").addEventListener("input", function (e) {
+    moverWidth = parseInt(e.target.value, 10);
+    moverOut.textContent = moverWidth + "px";
+    updateTravel();
+  });
+
+  /* ---------------- synthetic main-thread load ----------------
+     Busy-waits inside the rAF callback, which delays this frame's style,
+     layout and paint. The compositor keeps running the transform animation
+     meanwhile, so the chaser sails on while the grower stutters.        */
+
+  var loadMs = 0;
+  var loadOut = document.getElementById("loadOut");
+  var sink = 0;
+
+  document.getElementById("load").addEventListener("input", function (e) {
+    loadMs = parseInt(e.target.value, 10);
+    loadOut.textContent = loadMs + "ms";
+    loadOut.className = loadMs > 16 ? "warn" : "";
+  });
+
+  function burnMainThread(ms) {
+    if (ms <= 0) return;
+    var end = performance.now() + ms;
+    while (performance.now() < end)
+      sink += Math.sqrt(sink + 1);   // keep the loop from being optimized out
+  }
+
+  /* Nothing else runs per frame: no counters are displayed, so the animation
+     is the only thing touching style and layout while it plays.          */
+
+  (function tick() {
+    requestAnimationFrame(tick);
+    burnMainThread(loadMs);
+  })();
+})();
+</script>
+</body>
+</html>

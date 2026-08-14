@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Coordinated frame atomicity repro</title>
+<style>
+  body { margin: 0; background: #808080; overflow: hidden; }
+  .cell { position: absolute; width: 200px; height: 110px; }
+  canvas.cell { }
+  div.cell { will-change: transform; background: rgb(255,0,0); }
+  #vid { position: absolute; left: 1650px; top: 950px; width: 160px; height: 120px; }
+  #status { position: absolute; left: 1650px; top: 900px; color: white; font: 16px monospace; }
+</style>
+</head>
+<body>
+<video id="vid" muted autoplay loop playsinline>
+  <source src="video.webm" type="video/webm">
+  <source src="video.mp4" type="video/mp4">
+</video>
+<div id="status">init</div>
+<script>
+// 4 rows x 8 cols grid, alternating canvas / solid-color div cells.
+// Every rAF, ALL cells switch to the same parity color (red/blue).
+// Canvases ride the layer contentsBuffer path; solid divs ride the
+// solid-color/backing-store path. A composite that shows two cells with
+// different colors captured a torn (non frame-atomic) commit.
+const COLS = 8, ROWS = 4, W = 200, H = 110, GX = 220, GY = 130;
+const RED = 'rgb(255,0,0)', BLUE = 'rgb(0,0,255)';
+const canvases = [], solids = [];
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const isCanvas = (c % 2) === 0;
+    let el;
+    if (isCanvas) {
+      el = document.createElement('canvas');
+      el.width = 384; el.height = 384;
+      canvases.push(el.getContext('2d'));
+    } else {
+      el = document.createElement('div');
+      solids.push(el);
+    }
+    el.className = 'cell';
+    el.style.left = (20 + c * GX) + 'px';
+    el.style.top = (20 + r * GY) + 'px';
+    document.body.appendChild(el);
+  }
+}
+let parity = 0, frames = 0;
+function tick() {
+  parity ^= 1;
+  const color = parity ? BLUE : RED;
+  for (const ctx of canvases) {
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 384, 384);
+  }
+  for (const d of solids)
+    d.style.background = color;
+  frames++;
+  if (!(frames % 60))
+    document.getElementById('status').textContent = 'f=' + frames;
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+const v = document.getElementById('vid');
+function beacon(m) { new Image().src = '/vlog-' + encodeURIComponent(m); }
+v.addEventListener('error', () => beacon('error-' + (v.error && v.error.code)));
+v.addEventListener('playing', () => beacon('playing'));
+window.addEventListener('error', e => beacon('jserror-' + e.message));
+setTimeout(() => beacon('state-rs' + v.readyState + '-t' + Math.round(v.currentTime*10) + '-paused' + v.paused + '-err' + (v.error && v.error.code)), 8000);
+v.play().catch(e => beacon('playfail-' + e.name));
+
+</script>
+</body>
+</html>

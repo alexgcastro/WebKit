@@ -568,10 +568,11 @@ bool SkiaCompositingLayer::computeTransformsAndAnimations(const TransformationMa
     return hasRunningAnimations;
 }
 
-bool SkiaCompositingLayer::paint(SkCanvas& canvas, std::optional<Damage>& frameDamage, const std::optional<Damage>& priorTargetDamage, std::optional<SkColor> clearColor)
+bool SkiaCompositingLayer::paint(SkCanvas& canvas, std::optional<Damage>& frameDamage, const std::optional<Damage>& priorTargetDamage, std::optional<SkColor> clearColor, std::optional<MonotonicTime> animationSampleTime)
 {
     // Both walks below assume the animations have been applied and the transforms computed.
-    bool hasRunningAnimations = computeTransformsAndAnimations({ }, { }, MonotonicTime::now());
+    auto sampleTime = animationSampleTime.value_or(MonotonicTime::now());
+    bool hasRunningAnimations = computeTransformsAndAnimations({ }, { }, sampleTime);
 
 #if ENABLE(DAMAGE_TRACKING)
     // Collect the damage in a walk of its own first, so it is complete before the walk that draws. Each
