@@ -55,6 +55,9 @@
 #include <WebCore/WindowEventLoop.h>
 #include <cstdlib>
 #include <mutex>
+#if USE(GLIB_EVENT_LOOP)
+#include <glib.h>
+#endif
 #include <wtf/SetForScope.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -78,6 +81,17 @@ static unsigned framePipelineDepth()
         }
     });
     return depth;
+}
+
+static bool framePipelinePacedAdmission()
+{
+    static std::once_flag onceFlag;
+    static bool paced = true;
+    std::call_once(onceFlag, [] {
+        if (const char* envString = getenv("WEBKIT_COORDINATED_FRAME_PIPELINE_PACED"))
+            paced = envString[0] != '0';
+    });
+    return paced;
 }
 
 #if ENABLE(DAMAGE_TRACKING)
@@ -107,7 +121,12 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
 LayerTreeHost::LayerTreeHost(WebPage& webPage)
     : m_webPage(webPage)
     , m_sceneState(CoordinatedSceneState::create())
+    , m_pacedAdmissionIdleTimer(RunLoop::mainSingleton(), "LayerTreeHost::PacedAdmissionIdleTimer"_s, this, &LayerTreeHost::pacedAdmissionTimerFired)
+    , m_pacedAdmissionBackstopTimer(RunLoop::mainSingleton(), "LayerTreeHost::PacedAdmissionBackstopTimer"_s, this, &LayerTreeHost::pacedAdmissionTimerFired)
 {
+#if USE(GLIB_EVENT_LOOP)
+    m_pacedAdmissionIdleTimer.setPriority(G_PRIORITY_LOW);
+#endif
     {
         auto& rootLayer = m_sceneState->rootLayer();
 #if ENABLE(DAMAGE_TRACKING)
@@ -175,6 +194,23 @@ void LayerTreeHost::scheduleRenderingUpdate()
     scheduleRenderingUpdateRunLoopObserver();
 }
 
+void LayerTreeHost::pacedAdmissionTimerFired()
+{
+    m_pacedAdmissionIdleTimer.stop();
+    m_pacedAdmissionBackstopTimer.stop();
+
+    if (m_layerTreeStateIsFrozen || m_isSuspended || m_webPage->size().isEmpty())
+        return;
+
+    if (m_commitsInFlight >= framePipelineDepth()) {
+        m_scheduledWhileWaitingForRenderer = true;
+        return;
+    }
+
+    m_pacedAdmissionGranted = true;
+    scheduleRenderingUpdateRunLoopObserver();
+}
+
 void LayerTreeHost::scheduleRenderingUpdateRunLoopObserver()
 {
     FrameRenderer::scheduleRenderingUpdateRunLoopObserver();
@@ -195,6 +231,18 @@ void LayerTreeHost::updateRendering()
     RELEASE_ASSERT(!m_isUpdatingRendering);
     if (m_layerTreeStateIsFrozen)
         return;
+
+    // Paced admission has to be decided here rather than in scheduleRenderingUpdate(): the
+    // next update is typically scheduled from requestAnimationFrame callbacks running inside
+    // the previous update, before that update's commit has incremented m_commitsInFlight, so
+    // a schedule-time check sees an empty pipeline and admits back-to-back updates anyway.
+    if (m_commitsInFlight && framePipelinePacedAdmission() && !std::exchange(m_pacedAdmissionGranted, false)) {
+        if (!m_pacedAdmissionIdleTimer.isActive())
+            m_pacedAdmissionIdleTimer.startOneShot(0_s);
+        if (!m_pacedAdmissionBackstopTimer.isActive())
+            m_pacedAdmissionBackstopTimer.startOneShot(Seconds(0.008));
+        return;
+    }
 
     SetForScope<bool> reentrancyProtector(m_isUpdatingRendering, true);
 
