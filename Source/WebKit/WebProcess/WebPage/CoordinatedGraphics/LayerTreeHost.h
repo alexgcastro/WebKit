@@ -39,6 +39,7 @@
 #include <wtf/MonotonicTime.h>
 #include <wtf/CheckedRef.h>
 #include <wtf/CompletionHandler.h>
+#include <wtf/RunLoop.h>
 #include <wtf/Forward.h>
 #include <wtf/Lock.h>
 #include <wtf/OptionSet.h>
@@ -106,6 +107,8 @@ private:
     // GraphicsLayerFactory
     Ref<WebCore::GraphicsLayer> createGraphicsLayer(WebCore::GraphicsLayer::Type, WebCore::GraphicsLayerClient&) override;
 
+    void pacedAdmissionTimerFired();
+
     // FrameRenderer
     uint64_t surfaceID() const override;
     void updateRenderingWithForcedRepaint() override;
@@ -149,6 +152,9 @@ private:
     unsigned m_commitsInFlight { 0 };
     std::optional<MonotonicTime> m_currentCommitAnimationTimestamp;
     bool m_scheduledWhileWaitingForRenderer { false };
+    RunLoop::Timer m_pacedAdmissionIdleTimer;
+    RunLoop::Timer m_pacedAdmissionBackstopTimer;
+    bool m_pacedAdmissionGranted { false };
     bool m_forceFrameSync { false };
     bool m_compositionRequired { false };
 #if ENABLE(SCROLLING_THREAD)
