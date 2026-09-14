@@ -55,6 +55,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/gpu/ganesh/gl/GrGLDirectContext.h>
 #include <skia/utils/SkNoDrawCanvas.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#include <wtf/SystemTracing.h>
 #include <wtf/Scope.h>
 #include <wtf/SetForScope.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -594,7 +595,10 @@ bool SkiaCompositingLayer::paint(SkCanvas& canvas, std::optional<Damage>& frameD
         // device by the device pixel ratio.
         const auto canvasSize = canvas.getBaseLayerSize();
         SkNoDrawCanvas noDrawCanvas(canvasSize.width(), canvasSize.height());
-        recursivePaint(noDrawCanvas, collectContext);
+        {
+            WPE_TRACE_SCOPE("composite: collect damage walk");
+            recursivePaint(noDrawCanvas, collectContext);
+        }
 
         m_layerRectTracker->damageStaleLayerRectsAndAdvanceEntries(*frameDamage);
         resolveBackdropDamage(collectContext.collectState->backdropRectsInFrame, *frameDamage);
@@ -642,13 +646,31 @@ bool SkiaCompositingLayer::paint(SkCanvas& canvas, std::optional<Damage>& frameD
         PaintContext context;
         context.compositingDamageRegion = WTF::move(damageRegion);
 
-        recursivePaint(canvas, context);
-        context.imageSetBatch.flushIfNeeded(canvas);
+        {
+            WPE_TRACE_SCOPE("composite: draw walk");
+            recursivePaint(canvas, context);
+            context.imageSetBatch.flushIfNeeded(canvas);
+        }
+        WPE_TRACE_COUNTER("wpe.composite.layers-painted", context.layersPainted);
+        WPE_TRACE_COUNTER("wpe.composite.intermediate-surfaces", context.intermediateSurfaces);
     }
 
     recursiveCleanUpAfterPaint();
 
     return hasRunningAnimations;
+}
+
+const char* SkiaCompositingLayer::contentsKindName() const
+{
+    if (m_backingStore)
+        return "tiles";
+    if (m_contentsBuffer)
+        return "buffer";
+    if (m_imageBackingStore)
+        return "image";
+    if (m_contentsSolidColor.isValid() && m_contentsSolidColor.isVisible())
+        return "color";
+    return "container";
 }
 
 void SkiaCompositingLayer::clipRect(SkCanvas& canvas, const FloatRoundedRect& rect, const TransformationMatrix& transform)
@@ -1099,6 +1121,9 @@ void SkiaCompositingLayer::paintSelfAndChildren(SkCanvas& canvas, PaintContext& 
     if (stopPaintingIntoBackdropIfNeeded(context))
         return;
 
+    ++context.layersPainted;
+    WPE_TRACE_LAYER_SCOPE("layer %.0fx%.0f %s", m_rect.width(), m_rect.height(), contentsKindName());
+
     paintSelf(canvas, context);
 
     if (m_children.isEmpty())
@@ -1243,6 +1268,9 @@ void SkiaCompositingLayer::paintWithIntermediateSurface(SkCanvas& canvas, PaintC
     }
 #endif
 
+    WPE_TRACE_SCOPE_FORMATTED("composite: intermediate surface %dx%d", surfaceRect.width(), surfaceRect.height());
+    ++context.intermediateSurfaces;
+
     auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
     auto imageInfo = SkImageInfo::Make(surfaceRect.width(), surfaceRect.height(), kRGBA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
     auto surface = SkSurfaces::RenderTarget(grContext, skgpu::Budgeted::kNo, imageInfo, 0, kTopLeft_GrSurfaceOrigin, nullptr);
@@ -1265,7 +1293,10 @@ void SkiaCompositingLayer::paintWithIntermediateSurface(SkCanvas& canvas, PaintC
         paintFunction(*surfaceCanvas, context);
         context.imageSetBatch.flushIfNeeded(*surfaceCanvas);
     }
-    grContext->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
+    {
+        WPE_TRACE_SCOPE("composite: intermediate surface flush");
+        grContext->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
+    }
 
     auto snapshot = surface->makeImageSnapshot();
 

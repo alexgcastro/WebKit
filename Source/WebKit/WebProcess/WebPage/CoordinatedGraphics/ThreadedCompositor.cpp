@@ -547,8 +547,37 @@ TargetContents ThreadedCompositor::paintToSkiaCanvas(const TransformationMatrix&
     if (m_fpsCounter.drawsFPS)
         drawFPSCounter(*canvas);
 
-    if (auto* surface = canvas->getSurface())
-        PlatformDisplay::sharedDisplay().skiaGrContext()->flushAndSubmit(surface, GrSyncCpu::kNo);
+    if (auto* surface = canvas->getSurface()) {
+        // Where the frame's GPU work is actually handed to the driver. Split in two because
+        // they fail differently: flush() turns the recorded draws into GPU commands, which is
+        // where a program compile or a texture upload lands, while submit() only hands the
+        // command buffer over, which is where driver queue back-pressure lands.
+        auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
+
+        int resourcesBefore = 0;
+        size_t bytesBefore = 0;
+        const bool tracing = WPE_TRACE_ENABLED();
+        if (tracing)
+            grContext->getResourceCacheUsage(&resourcesBefore, &bytesBefore);
+
+        {
+            WPE_TRACE_SCOPE("composite: flush");
+            grContext->flush(surface);
+        }
+        {
+            WPE_TRACE_SCOPE("composite: submit");
+            grContext->submit(GrSyncCpu::kNo);
+        }
+
+        if (tracing) {
+            int resourcesAfter = 0;
+            size_t bytesAfter = 0;
+            grContext->getResourceCacheUsage(&resourcesAfter, &bytesAfter);
+            // A frame that allocates GPU resources is a frame that uploaded new content.
+            WPE_TRACE_COUNTER("wpe.skia.gpu-resources-added", resourcesAfter - resourcesBefore);
+            WPE_TRACE_COUNTER("wpe.skia.gpu-bytes-added", static_cast<int64_t>(bytesAfter) - static_cast<int64_t>(bytesBefore));
+        }
+    }
 
     if (hasRunningAnimations)
         requestComposition(CompositionReason::Animation);
@@ -572,7 +601,7 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
 }
 #endif
 
-#if HAVE(OS_SIGNPOST) || USE(SYSPROF_CAPTURE)
+#if HAVE(SIGNPOSTS)
 static String reasonsToString(const OptionSet<CompositionReason>& reasons)
 {
     StringBuilder builder;

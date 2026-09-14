@@ -44,6 +44,7 @@
 #include "ScrollingTreePositionedNode.h"
 #include "ScrollingTreeScrollingNode.h"
 #include <wtf/SetForScope.h>
+#include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/TextStream.h>
 
@@ -134,6 +135,17 @@ OptionSet<WheelEventProcessingSteps> ScrollingTree::computeWheelProcessingSteps(
     return { WheelEventProcessingSteps::AsyncScrolling };
 }
 
+static const char* wheelProcessingName(OptionSet<WheelEventProcessingSteps> steps)
+{
+    if (steps.contains(WheelEventProcessingSteps::SynchronousScrolling))
+        return "SynchronousScrolling (main thread scrolls)";
+    if (steps.contains(WheelEventProcessingSteps::BlockingDOMEventDispatch))
+        return "AsyncScrolling + BlockingDOMEventDispatch";
+    if (steps.contains(WheelEventProcessingSteps::NonBlockingDOMEventDispatch))
+        return "AsyncScrolling + NonBlockingDOMEventDispatch";
+    return "AsyncScrolling";
+}
+
 OptionSet<WheelEventProcessingSteps> ScrollingTree::determineWheelEventProcessing(const PlatformWheelEvent& wheelEvent)
 {
     // This method is invoked by the event handling thread
@@ -148,6 +160,11 @@ OptionSet<WheelEventProcessingSteps> ScrollingTree::determineWheelEventProcessin
         m_treeState.gestureState = std::nullopt;
 
     auto processingSteps = computeWheelProcessingSteps(wheelEvent);
+
+    // The touch gesture is delivered to the engine as a wheel event, so this is where a
+    // scroll that looked asynchronous at the touch layer can still end up on the main thread.
+    WPE_TRACE_INSTANT("wheel processing: %s", wheelProcessingName(processingSteps));
+    WPE_TRACE_COUNTER("wpe.wheel.blocking", processingSteps.containsAny({ WheelEventProcessingSteps::SynchronousScrolling, WheelEventProcessingSteps::BlockingDOMEventDispatch }) ? 1 : 0);
 
     m_latchingController.receivedWheelEvent(wheelEvent, processingSteps, m_allowLatching);
 
