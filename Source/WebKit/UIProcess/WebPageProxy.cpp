@@ -5743,7 +5743,17 @@ void WebPageProxy::processNextQueuedTouchEvent()
 
     auto& queuedEvent = internals().touchEventQueue.first();
     protect(legacyMainFrameProcess())->startResponsivenessTimer();
-    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::EventDispatcher::TouchEvent(webPageIDInProcess(processContainingFrame(frameID)), frameID, queuedEvent.forwardedEvent.copyRef()), [this, protectedThis = Ref { *this }] (IPC::Connection* connection, WebKit::WebEventType eventType, bool handled) mutable {
+
+    // The gesture recogniser only runs once the reply lands in doneWithTouchEvent(), so
+    // this round trip is the floor on how quickly a finger movement can turn into a scroll.
+    auto cookie = WPE_TRACE_ASYNC_COOKIE();
+    auto sendTime = MonotonicTime::now();
+    WPE_TRACE_ASYNC_BEGIN("UI: touch event round trip", cookie);
+
+    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::EventDispatcher::TouchEvent(webPageIDInProcess(processContainingFrame(frameID)), frameID, queuedEvent.forwardedEvent.copyRef()), [this, protectedThis = Ref { *this }, cookie, sendTime] (IPC::Connection* connection, WebKit::WebEventType eventType, bool handled) mutable {
+        WPE_TRACE_ASYNC_END("UI: touch event round trip", cookie);
+        WPE_TRACE_COUNTER("wpe.ui.touch-round-trip-us", (MonotonicTime::now() - sendTime).microsecondsAs<int64_t>());
+
         RefPtr pageClient = this->pageClient();
         if (!pageClient)
             return;
@@ -5799,11 +5809,15 @@ void WebPageProxy::handleTouchEvent(IPC::Connection*, Ref<NativeWebTouchEvent>&&
             event->mergeMovedTouchPointsFrom(lastEvent.forwardedEvent.get());
             auto replacedEvent = std::exchange(lastEvent.forwardedEvent, WTF::move(event));
             lastEvent.deferredTouchEvents.append(WTF::move(replacedEvent));
+            // Only one touch event is in flight at a time, so a growing backlog means the
+            // finger is outrunning the replies.
+            WPE_TRACE_COUNTER("wpe.ui.touch-coalesced", lastEvent.deferredTouchEvents.size());
             return;
         }
     }
 
     internals().touchEventQueue.append(WTF::move(event));
+    WPE_TRACE_COUNTER("wpe.ui.touch-queue-depth", internals().touchEventQueue.size());
 
     if (internals().touchEventQueue.size() == 1)
         processNextQueuedTouchEvent();

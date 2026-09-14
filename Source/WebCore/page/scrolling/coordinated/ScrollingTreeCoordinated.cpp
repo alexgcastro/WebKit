@@ -41,6 +41,7 @@
 #include "ScrollingTreePositionedNodeCoordinated.h"
 #include "ScrollingTreeStickyNodeCoordinated.h"
 #include <ranges>
+#include <wtf/SystemTracing.h>
 
 namespace WebCore {
 
@@ -369,8 +370,10 @@ static TrackingType mergeTrackingTypes(TrackingType a, TrackingType b)
 TrackingType ScrollingTreeCoordinated::eventTrackingTypeForTouchEvent(const PlatformTouchEvent& event)
 {
     auto offset = mainFrameScrollOffset();
-    if (!offset)
+    if (!offset) {
+        WPE_TRACE_INSTANT("touch: no main frame scroll offset, scrolling tree not committed yet");
         return TrackingType::NotTracking;
+    }
 
     for (auto& touchPoint : event.touchPoints()) {
         if (touchPoint.state() != PlatformTouchPoint::State::TouchPressed)
@@ -380,8 +383,10 @@ TrackingType ScrollingTreeCoordinated::eventTrackingTypeForTouchEvent(const Plat
         location.move(*offset);
 
         auto layerAndPoint = findLayerOfEventRegionAtPoint(*this, location);
-        if (!layerAndPoint)
+        if (!layerAndPoint) {
+            WPE_TRACE_INSTANT("touch: no layer with an event region under the touch point");
             continue;
+        }
 
         Locker layerLocker { layerAndPoint->first->lock() };
         auto& eventRegion = layerAndPoint->first->eventRegion();
@@ -391,6 +396,10 @@ TrackingType ScrollingTreeCoordinated::eventTrackingTypeForTouchEvent(const Plat
                 return;
 
             auto trackingTypeForLocation = eventRegion.eventTrackingTypeForPoint(eventType, roundedIntPoint(layerAndPoint->second));
+            // Naming the event type that forces the sequence synchronous is the whole
+            // point: it is what a page has to drop, or make passive, to scroll async.
+            if (trackingTypeForLocation == TrackingType::Synchronous)
+                WPE_TRACE_INSTANT("touch sync forced by non-passive %s listener", EventTrackingRegions::eventName(eventType).characters());
             trackingType = mergeTrackingTypes(trackingType, trackingTypeForLocation);
         };
 

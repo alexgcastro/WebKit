@@ -34,6 +34,7 @@
 #include "NativeWebMouseEvent.h"
 #include "NativeWebTouchEvent.h"
 #include "NativeWebWheelEvent.h"
+#include <wtf/SystemTracing.h>
 #include "ScreenManager.h"
 #include "UIGamepadProvider.h"
 #include "ViewSnapshotStore.h"
@@ -473,6 +474,9 @@ gboolean ViewPlatform::handleEvent(WPEEvent* event)
 
 void ViewPlatform::handleGesture(WPEEvent* event)
 {
+    // Reached from doneWithTouchEvent(), that is, only once the web process has replied.
+    WPE_TRACE_SCOPE("UI: gesture recognition");
+
     auto* gestureController = wpe_view_get_gesture_controller(m_wpeView.get());
     if (!gestureController)
         return;
@@ -532,6 +536,7 @@ void ViewPlatform::handleGesture(WPEEvent* event)
             GRefPtr<WPEEvent> simulatedScrollEvent = adoptGRef(wpe_event_scroll_new(
                 m_wpeView.get(), WPE_INPUT_SOURCE_TOUCHSCREEN, 0, static_cast<WPEModifiers>(0), dx, dy, TRUE, FALSE, x, y
             ));
+            WPE_TRACE_INSTANT("UI: drag -> wheel event (dx %d dy %d)", static_cast<int>(dx), static_cast<int>(dy));
             page().handleNativeWheelEvent(WebKit::NativeWebWheelEvent::create(simulatedScrollEvent.get(), phase));
         }
     }

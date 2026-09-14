@@ -209,6 +209,10 @@ private:
         RefPtr<SkiaCompositingLayer> paintingBackdropForLayer;
         bool skipAfterBackdrop { false };
         SkiaCompositingLayerImageSetBatch imageSetBatch;
+
+        // Counted for tracing: how much work a frame's composite turned out to be.
+        unsigned layersPainted { 0 };
+        unsigned intermediateSurfaces { 0 };
     };
 
     struct Filter {
@@ -250,6 +254,7 @@ private:
     void collect3DRenderingContextLayers(Vector<SkiaCompositingLayer3DRenderingContext::Layer>&);
     void recursiveCleanUpAfterPaint();
 
+    const char* contentsKindName() const;
     void clipRect(SkCanvas&, const FloatRoundedRect&, const TransformationMatrix& = { });
 
     enum class IncludesReplica : bool { No, Yes };

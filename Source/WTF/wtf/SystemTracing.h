@@ -45,6 +45,12 @@
 #include <sys/types.h>
 #endif
 
+// True when WTFBeginSignpost and friends actually emit something. Guards the helpers that
+// exist only to build a signpost's description, which are dead weight otherwise.
+#if !defined(HAVE_SIGNPOSTS) && (HAVE(OS_SIGNPOST) || USE(SYSPROF_CAPTURE) || OS(ANDROID))
+#define HAVE_SIGNPOSTS 1
+#endif
+
 // No namespaces because this file has to be includable from C and Objective-C.
 
 // Reserved kdebug codes. Do not change these.
@@ -217,6 +223,10 @@ enum TracePointCode {
 #include <wtf/glib/SysprofAnnotator.h>
 #endif
 
+#if OS(ANDROID)
+#include <wtf/android/ATraceAnnotator.h>
+#endif
+
 namespace WTF {
 
 inline void tracePoint(TracePointCode code, uint64_t data1 = 0, uint64_t data2 = 0, uint64_t data3 = 0, uint64_t data4 = 0)
@@ -229,6 +239,8 @@ inline void tracePoint(TracePointCode code, uint64_t data1 = 0, uint64_t data2 =
     UNUSED_PARAM(data2);
     UNUSED_PARAM(data3);
     UNUSED_PARAM(data4);
+#elif OS(ANDROID)
+    ATraceAnnotator::tracePoint(code, data1, data2, data3, data4);
 #else
     UNUSED_PARAM(code);
     UNUSED_PARAM(data1);
@@ -518,6 +530,72 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END \
             annotator->setCounter(std::span(_STRINGIFY(name)), value); \
     } while (0)
 
+#elif OS(ANDROID)
+
+// Signposts carry a pointer key and may begin and end on different threads, so they map to
+// process-scoped ATrace sections rather than the thread-scoped kind. The name has to match
+// between begin and end for Perfetto to pair them, so a description goes out as its own
+// marker instead of being folded into the name.
+
+#define WTF_ATRACE_UNUSED(...) ((void)sizeof(WTF::aTraceIgnore(0 __VA_OPT__(,) __VA_ARGS__)))
+// Arguments go through LOG_PRINTF_TYPE, as for sysprof, so string objects reach the
+// printf-style formatter as plain C strings.
+#define WTFATraceFormatAndArgs(name, ...) _STRINGIFY(name) " " __VA_OPT__(WTFATraceSplitFormatAndArgs(__VA_ARGS__))
+#define WTFATraceSplitFormatAndArgs(format, ...) format __VA_OPT__(, LOG_PRINTF_TYPE(__VA_ARGS__))
+
+#define WTFEmitSignpost(pointer, name, ...) \
+    do { \
+        IGNORE_WARNINGS_BEGIN("format-zero-length") \
+        IGNORE_WARNINGS_BEGIN("unsafe-buffer-usage-in-format-attr-call") \
+        if (WTF::ATraceAnnotator::isEnabled()) \
+            WTF::ATraceAnnotator::instant(WTFATraceFormatAndArgs(name, __VA_ARGS__)); \
+        IGNORE_WARNINGS_END \
+        IGNORE_WARNINGS_END \
+        UNUSED_PARAM(pointer); \
+    } while (0)
+
+#define WTFBeginSignpost(pointer, name, ...) \
+    do { \
+        IGNORE_WARNINGS_BEGIN("format-zero-length") \
+        IGNORE_WARNINGS_BEGIN("unsafe-buffer-usage-in-format-attr-call") \
+        if (WTF::ATraceAnnotator::isEnabled()) { \
+            WTF::ATraceAnnotator::beginAsync(_STRINGIFY(name), WTF::ATraceAnnotator::cookieForPointer(pointer)); \
+            __VA_OPT__(WTF::ATraceAnnotator::instant(WTFATraceFormatAndArgs(name, __VA_ARGS__));) \
+        } \
+        IGNORE_WARNINGS_END \
+        IGNORE_WARNINGS_END \
+    } while (0)
+
+#define WTFEndSignpost(pointer, name, ...) \
+    do { \
+        WTF::ATraceAnnotator::endAsync(_STRINGIFY(name), WTF::ATraceAnnotator::cookieForPointer(pointer)); \
+        WTF_ATRACE_UNUSED(__VA_ARGS__); \
+    } while (0)
+
+#define WTFEmitSignpostAlways(pointer, name, ...) WTFEmitSignpost((pointer), name, ##__VA_ARGS__)
+#define WTFBeginSignpostAlways(pointer, name, ...) WTFBeginSignpost((pointer), name, ##__VA_ARGS__)
+#define WTFEndSignpostAlways(pointer, name, ...) WTFEndSignpost((pointer), name, ##__VA_ARGS__)
+
+// ATrace timestamps events as they are emitted and cannot backdate one, so the variants
+// that carry their own time have nowhere to put it.
+#define WTFEmitSignpostWithTimeDelta(pointer, name, timeDelta, ...) do { UNUSED_PARAM(pointer); UNUSED_PARAM(timeDelta); WTF_ATRACE_UNUSED(__VA_ARGS__); } while (0)
+#define WTFBeginSignpostWithTimeDelta(pointer, name, timeDelta, ...) WTFEmitSignpostWithTimeDelta((pointer), name, (timeDelta), ##__VA_ARGS__)
+#define WTFEndSignpostWithTimeDelta(pointer, name, timeDelta, ...) WTFEmitSignpostWithTimeDelta((pointer), name, (timeDelta), ##__VA_ARGS__)
+
+#define WTFEmitSignpostAlwaysWithTimeDelta(pointer, name, timeDelta, ...) WTFEmitSignpostWithTimeDelta((pointer), name, (timeDelta), ##__VA_ARGS__)
+#define WTFBeginSignpostAlwaysWithTimeDelta(pointer, name, timeDelta, ...) WTFEmitSignpostWithTimeDelta((pointer), name, (timeDelta), ##__VA_ARGS__)
+#define WTFEndSignpostAlwaysWithTimeDelta(pointer, name, timeDelta, ...) WTFEmitSignpostWithTimeDelta((pointer), name, (timeDelta), ##__VA_ARGS__)
+
+#define WTFEmitSignpostWithSpecificTime(pointer, name, specificTime, ...) do { UNUSED_PARAM(pointer); UNUSED_PARAM(specificTime); WTF_ATRACE_UNUSED(__VA_ARGS__); } while (0)
+#define WTFBeginSignpostWithSpecificTime(pointer, name, specificTime, ...) WTFEmitSignpostWithSpecificTime((pointer), name, (specificTime), ##__VA_ARGS__)
+#define WTFEndSignpostWithSpecificTime(pointer, name, specificTime, ...) WTFEmitSignpostWithSpecificTime((pointer), name, (specificTime), ##__VA_ARGS__)
+
+#define WTFEmitSignpostAlwaysWithSpecificTime(pointer, name, specificTime, ...) WTFEmitSignpostWithSpecificTime((pointer), name, (specificTime), ##__VA_ARGS__)
+#define WTFBeginSignpostAlwaysWithSpecificTime(pointer, name, specificTime, ...) WTFEmitSignpostWithSpecificTime((pointer), name, (specificTime), ##__VA_ARGS__)
+#define WTFEndSignpostAlwaysWithSpecificTime(pointer, name, specificTime, ...) WTFEmitSignpostWithSpecificTime((pointer), name, (specificTime), ##__VA_ARGS__)
+
+#define WTFSetCounter(name, value) WTF::ATraceAnnotator::counter(_STRINGIFY(name), value)
+
 #else
 
 #define WTFEmitSignpost(pointer, name, ...) do { } while (0)
@@ -545,5 +623,39 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END \
 #define WTFEndSignpostAlwaysWithSpecificTime(pointer, name, ...) do { } while (0)
 
 #define WTFSetCounter(name, value) do { } while (0)
+
+#endif
+
+// Scroll and touch annotations that carry their reason in the slice name. They go to
+// Android's systrace/Perfetto timeline; elsewhere they compile away.
+#if OS(ANDROID)
+
+#define WPE_TRACE_ENABLED() WTF::ATraceAnnotator::isEnabled()
+#define WPE_TRACE_SCOPE(name) WTF::ATraceScope __wpeTraceScope(name)
+#define WPE_TRACE_SCOPE_FORMATTED(...) WTF::ATraceFormattedScope __wpeTraceScope(WTF::ATraceAnnotator::isEnabled(), __VA_ARGS__)
+#define WPE_TRACE_LAYERS_ENABLED() WTF::ATraceAnnotator::layersEnabled()
+#define WPE_TRACE_LAYER_SCOPE(...) WTF::ATraceFormattedScope __wpeTraceLayerScope(WTF::ATraceAnnotator::layersEnabled(), __VA_ARGS__)
+#define WPE_TRACE_BEGIN(name) WTF::ATraceAnnotator::begin(name)
+#define WPE_TRACE_END() WTF::ATraceAnnotator::end()
+#define WPE_TRACE_ASYNC_COOKIE() WTF::ATraceAnnotator::nextCookie()
+#define WPE_TRACE_ASYNC_BEGIN(name, cookie) WTF::ATraceAnnotator::beginAsync(name, cookie)
+#define WPE_TRACE_ASYNC_END(name, cookie) WTF::ATraceAnnotator::endAsync(name, cookie)
+#define WPE_TRACE_INSTANT(...) WTF::ATraceAnnotator::instant(__VA_ARGS__)
+#define WPE_TRACE_COUNTER(name, value) WTF::ATraceAnnotator::counter(name, value)
+
+#else
+
+#define WPE_TRACE_ENABLED() false
+#define WPE_TRACE_SCOPE(name) do { } while (0)
+#define WPE_TRACE_SCOPE_FORMATTED(...) do { } while (0)
+#define WPE_TRACE_LAYERS_ENABLED() false
+#define WPE_TRACE_LAYER_SCOPE(...) do { } while (0)
+#define WPE_TRACE_BEGIN(name) do { } while (0)
+#define WPE_TRACE_END() do { } while (0)
+#define WPE_TRACE_ASYNC_COOKIE() 0
+#define WPE_TRACE_ASYNC_BEGIN(name, cookie) do { UNUSED_PARAM(cookie); } while (0)
+#define WPE_TRACE_ASYNC_END(name, cookie) do { UNUSED_PARAM(cookie); } while (0)
+#define WPE_TRACE_INSTANT(...) do { } while (0)
+#define WPE_TRACE_COUNTER(name, value) do { UNUSED_PARAM(value); } while (0)
 
 #endif

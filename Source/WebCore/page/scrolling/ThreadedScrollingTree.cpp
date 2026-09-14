@@ -124,13 +124,19 @@ void ThreadedScrollingTree::waitForEventToBeProcessedByMainThread(const Platform
     auto startTime = MonotonicTime::now();
     auto timeoutTime = startTime + maxAllowableMainThreadDelay;
 
+    WPE_TRACE_BEGIN("scroll: gesture start blocked on main thread wheel handler");
     bool receivedEvent = m_waitingForBeganEventCondition.waitUntil(m_treeLock, timeoutTime, [&] {
         assertIsHeld(m_treeLock);
         return m_receivedBeganEventFromMainThread;
     });
+    WPE_TRACE_END();
+
+    auto waitDuration = MonotonicTime::now() - startTime;
+    WPE_TRACE_COUNTER("wpe.scroll.gesture-start-wait-us", waitDuration.microsecondsAs<int64_t>());
 
     if (!receivedEvent) {
         // Timed out, go asynchronous.
+        WPE_TRACE_INSTANT("scroll: gesture start timed out after %d ms, going non-blocking", static_cast<int>(waitDuration.millisecondsAs<int64_t>()));
         setGestureState(WheelScrollGestureState::NonBlocking);
     }
 
@@ -228,9 +234,22 @@ void ThreadedScrollingTree::propagateSynchronousScrollingReasons(const HashSet<S
 
     m_hasNodesWithSynchronousScrollingReasons = !synchronousScrollingNodes.isEmpty();
 
+    // With any of these set the scrolling thread may not move layers by itself, so every
+    // frame of the scroll has to come from the main thread no matter how the touch was
+    // classified.
+    WPE_TRACE_COUNTER("wpe.scroll.nodes-forcing-main-thread", synchronousScrollingNodes.size());
+
     for (auto nodeID : synchronousScrollingNodes) {
-        if (RefPtr node = nodeForID(nodeID))
+        if (RefPtr node = nodeForID(nodeID)) {
+            if (WPE_TRACE_ENABLED()) {
+                if (RefPtr scrollingNode = dynamicDowncast<ScrollingTreeScrollingNode>(*node)) {
+                    TextStream description;
+                    description << "scroll: node " << nodeID << " forces main thread scrolling: " << scrollingNode->synchronousScrollingReasons();
+                    WPE_TRACE_INSTANT("%s", reinterpret_cast<const char*>(description.release().utf8().data()));
+                }
+            }
             propagateStateToAncestors(*node);
+        }
     }
 }
 
@@ -492,6 +511,8 @@ void ThreadedScrollingTree::waitForRenderingUpdateCompletionOrTimeout()
     });
 
     ASSERT(m_treeLock.isLocked());
+
+    WPE_TRACE_COUNTER("wpe.scroll.rendering-update-wait-us", (MonotonicTime::now() - currentTime).microsecondsAs<int64_t>());
 
     if (!becameIdle) {
         m_state = SynchronizationState::Desynchronized;

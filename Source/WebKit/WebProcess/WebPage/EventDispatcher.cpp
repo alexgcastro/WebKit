@@ -301,6 +301,35 @@ void EventDispatcher::dispatchTouchEvents()
     }
 }
 #elif ENABLE(COORDINATED_TOUCH_EVENTS)
+static ASCIILiteral touchEventName(WebEventType type)
+{
+    switch (type) {
+    case WebEventType::TouchStart:
+        return "TouchStart"_s;
+    case WebEventType::TouchMove:
+        return "TouchMove"_s;
+    case WebEventType::TouchEnd:
+        return "TouchEnd"_s;
+    case WebEventType::TouchCancel:
+        return "TouchCancel"_s;
+    default:
+        return "Touch?"_s;
+    }
+}
+
+static ASCIILiteral trackingTypeName(WebCore::TrackingType type)
+{
+    switch (type) {
+    case WebCore::TrackingType::NotTracking:
+        return "NotTracking"_s;
+    case WebCore::TrackingType::Asynchronous:
+        return "Asynchronous"_s;
+    case WebCore::TrackingType::Synchronous:
+        return "Synchronous"_s;
+    }
+    return "?"_s;
+}
+
 void EventDispatcher::dispatchTouchEventViaMainThread(WebCore::PageIdentifier pageID, Ref<WebTouchEvent>&& touchEvent, CompletionHandler<void(WebEventType, bool)>&& completionHandler)
 {
     RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, pageID, touchEvent = WTF::move(touchEvent), completionHandler = WTF::move(completionHandler)] mutable {
@@ -328,6 +357,9 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
 
     auto trackingType = scrollingTree->eventTrackingTypeForTouchEvent(platform(touchEvent));
 
+    WPE_TRACE_INSTANT("touch %s classified %s", touchEventName(touchEvent->type()).characters(), trackingTypeName(trackingType).characters());
+    WPE_TRACE_COUNTER("wpe.touch.blocking", trackingType == TrackingType::Synchronous ? 1 : 0);
+
     if (trackingType == TrackingType::NotTracking) {
         completionHandler(touchEvent->type(), false);
         return;
@@ -337,7 +369,18 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
         dispatchTouchEventViaMainThread(pageID, WTF::move(touchEvent), nullptr);
         return;
     }
-    dispatchTouchEventViaMainThread(pageID, WTF::move(touchEvent), WTF::move(completionHandler));
+
+    // The page has a non-passive listener here, so the reply, and with it the whole
+    // gesture, has to wait for the main thread. This is the span that shows up as a
+    // stalled scroll, so measure it rather than guess at it.
+    auto cookie = WPE_TRACE_ASYNC_COOKIE();
+    auto startTime = MonotonicTime::now();
+    WPE_TRACE_ASYNC_BEGIN("touch blocked on web process main thread", cookie);
+    dispatchTouchEventViaMainThread(pageID, WTF::move(touchEvent), [cookie, startTime, completionHandler = WTF::move(completionHandler)](WebEventType type, bool handled) mutable {
+        WPE_TRACE_ASYNC_END("touch blocked on web process main thread", cookie);
+        WPE_TRACE_COUNTER("wpe.touch.main-thread-block-us", (MonotonicTime::now() - startTime).microsecondsAs<int64_t>());
+        completionHandler(type, handled);
+    });
 }
 #endif
 

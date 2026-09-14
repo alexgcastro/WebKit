@@ -52,6 +52,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include <wtf/MemoryPressureHandler.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/RAMSize.h>
+#include <wtf/SystemTracing.h>
 #include <wtf/ThreadSafeWeakPtr.h>
 #include <wtf/text/StringToIntegerConversion.h>
 
@@ -63,6 +64,34 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #endif
 
 namespace WebCore {
+
+#if OS(ANDROID)
+class ProgramCompilationTracer final : public GrContextOptions::PersistentCache {
+public:
+    sk_sp<SkData> load(const SkData&) final
+    {
+        WPE_TRACE_COUNTER("wpe.skia.program-lookups", ++m_lookups);
+        return nullptr;
+    }
+
+    void store(const SkData&, const SkData& data, const SkString& description) final
+    {
+        WPE_TRACE_INSTANT("skia: compiled a GPU program (%zu bytes) %s", data.size(), description.c_str());
+        WPE_TRACE_COUNTER("wpe.skia.programs-compiled", ++m_compilations);
+    }
+
+private:
+    std::atomic<int64_t> m_lookups { 0 };
+    std::atomic<int64_t> m_compilations { 0 };
+};
+
+static ProgramCompilationTracer& programCompilationTracer()
+{
+    static NeverDestroyed<ProgramCompilationTracer> tracer;
+    return tracer.get();
+}
+#endif
+
 
 #if PLATFORM(GTK) || PLATFORM(WPE)
 #if CPU(X86) || CPU(X86_64)
@@ -340,6 +369,16 @@ private:
 
         // FIXME: Add shader cache.
         GrContextOptions options;
+#if OS(ANDROID)
+        // Not a cache: load() always misses, exactly as today with no cache at all, so the
+        // engine behaves the same. It is here because Skia calls store() precisely when it
+        // has compiled a new program, which is the only way to see program compilation in a
+        // trace. Observing it is not free - Skia fetches the compiled binary to hand over,
+        // which on Mali roughly tripled the worst composite - so it is behind
+        // debug.wpe.atrace=shaders and the timing of the stores is the signal, not the cost.
+        if (WTF::ATraceAnnotator::shaderTracingRequested())
+            options.fPersistentCache = &programCompilationTracer();
+#endif
         options.fAllowMSAAOnNewIntel = shouldAllowMSAAOnNewIntel();
         // Skia defaults this to true, which alters the texture2D() calls in all generated shaders,
         // applying a so-called negative LOD bias, forcing texture2D() sampling into a LOD-computing
