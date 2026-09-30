@@ -1952,6 +1952,15 @@ void LocalFrameView::setBaseLayoutViewportOrigin(LayoutPoint origin, TriggerLayo
 {
     ASSERT(m_frame->settings().visualViewportEnabled());
 
+    // An origin derived from a scrolling tree position between CSS pixels arrives truncated to
+    // LayoutUnits, just below the device pixel it is on; see visualViewportRect().
+    if (m_scrollingTreeScrollPosition) {
+        constexpr float layoutUnit = 1.f / 64;
+        auto exact = *m_scrollingTreeScrollPosition;
+        if (exact.x() >= 0 && exact.y() >= 0 && std::abs(origin.x().toFloat() - exact.x()) < layoutUnit && std::abs(origin.y().toFloat() - exact.y()) < layoutUnit)
+            origin = { LayoutUnit::fromFloatCeil(exact.x()), LayoutUnit::fromFloatCeil(exact.y()) };
+    }
+
     if (origin == m_layoutViewportOrigin)
         return;
 
@@ -1994,6 +2003,14 @@ void LocalFrameView::setLayoutViewportOverrideRect(std::optional<LayoutRect> rec
 void LocalFrameView::setVisualViewportOverrideRect(std::optional<LayoutRect> rect)
 {
     m_visualViewportOverrideRect = rect;
+}
+
+void LocalFrameView::setScrollingTreeScrollPosition(std::optional<FloatPoint> position)
+{
+    if (m_scrollingTreeScrollPosition == position)
+        return;
+    m_scrollingTreeScrollPosition = position;
+    updateLayoutViewport();
 }
 
 LayoutSize LocalFrameView::baseLayoutViewportSize() const
@@ -2125,6 +2142,18 @@ LayoutRect LocalFrameView::visualViewportRect() const
     if (m_visualViewportOverrideRect)
         return m_visualViewportOverrideRect.value();
 
+    // Only while it still describes the current scroll position: a scroll done by the main
+    // thread (script, anchor navigation) supersedes it until the scrolling tree reports again.
+    if (m_scrollingTreeScrollPosition && roundedIntPoint(*m_scrollingTreeScrollPosition) == scrollPosition()) {
+        visibleContentRect.move(*m_scrollingTreeScrollPosition - FloatPoint(scrollPosition()));
+        auto rect = visibleDocumentRect(visibleContentRect, headerHeight(), footerHeight(), totalContentsSize(), frameScaleFactor());
+        // A position between CSS pixels is usually not a whole number of LayoutUnits, and
+        // truncating it leaves the viewport just below the device pixel it is on; fixed layers
+        // snapped against it then land a whole device pixel off. Round the origin up instead.
+        if (frameScaleFactor() == 1 && !headerHeight() && visibleContentRect.y() >= 0 && visibleContentRect.x() >= 0)
+            rect.setLocation({ LayoutUnit::fromFloatCeil(visibleContentRect.x()), LayoutUnit::fromFloatCeil(visibleContentRect.y()) });
+        return rect;
+    }
     return visibleDocumentRect(visibleContentRect, headerHeight(), footerHeight(), totalContentsSize(), frameScaleFactor());
 }
 

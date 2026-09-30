@@ -113,6 +113,10 @@ public:
     void initializeConnection(IPC::Connection&);
 
     void notifyScrollingTreesDisplayDidRefresh(WebCore::PlatformDisplayID);
+#if ENABLE(ASYNC_SCROLLING) && ENABLE(SCROLLING_THREAD)
+    // Called by the compositor right before it composites, from its own thread.
+    void serviceScrollAnimationsForComposite(WebCore::PageIdentifier);
+#endif
 
 private:
     // IPC::MessageReceiver overrides.
@@ -173,6 +177,12 @@ private:
     const Ref<WorkQueue> m_queue;
 
 #if ENABLE(ASYNC_SCROLLING) && ENABLE(SCROLLING_THREAD)
+#if ENABLE(COORDINATED_TOUCH_EVENTS)
+    // Pages whose current touch sequence has started scrolling: its first blocking touchmove
+    // came back not prevented, so the rest of the sequence can no longer cancel the scroll.
+    Lock m_touchScrollingPagesLock;
+    HashSet<WebCore::PageIdentifier> m_touchScrollingPages WTF_GUARDED_BY_LOCK(m_touchScrollingPagesLock);
+#endif
     Lock m_scrollingTreesLock;
     HashMap<WebCore::PageIdentifier, Ref<WebCore::ThreadedScrollingTree>> m_scrollingTrees WTF_GUARDED_BY_LOCK(m_scrollingTreesLock);
 #endif

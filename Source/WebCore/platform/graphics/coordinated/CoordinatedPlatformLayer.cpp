@@ -38,6 +38,7 @@
 #include "GraphicsLayerCoordinated.h"
 #include "NativeImage.h"
 #include <wtf/MainThread.h>
+#include <wtf/SystemTracing.h>
 
 #if USE(TEXTURE_MAPPER)
 #include "CoordinatedBackingStore.h"
@@ -184,6 +185,18 @@ void CoordinatedPlatformLayer::setPosition(FloatPoint&& position)
 {
     assertIsHeld(m_lock);
     m_pendingState.position = WTF::move(position);
+}
+
+float CoordinatedPlatformLayer::contentsScaleForScrolling()
+{
+    Locker locker { m_lock };
+    return m_contentsScale;
+}
+
+void CoordinatedPlatformLayer::setTracesScrollPosition()
+{
+    Locker locker { m_lock };
+    m_tracesScrollPosition = true;
 }
 
 void CoordinatedPlatformLayer::setPositionForScrolling(const FloatPoint& position)
@@ -990,6 +1003,14 @@ void CoordinatedPlatformLayer::requestComposition(CompositionReason reason)
         m_client->requestComposition(reason);
 }
 
+void CoordinatedPlatformLayer::requestCompositionFromScrolling(CompositionReason reason)
+{
+    if (!m_client)
+        return;
+    m_client->notifyCompositionRequired();
+    m_client->requestComposition(reason);
+}
+
 RunLoop* CoordinatedPlatformLayer::compositingRunLoop() const
 {
     return m_client ? m_client->compositingRunLoop() : nullptr;
@@ -1031,8 +1052,14 @@ void CoordinatedPlatformLayer::flushPendingState()
     if (m_pendingState.positionForScrolling) {
         m_pendingState.position = std::nullopt;
         position = *std::exchange(m_pendingState.positionForScrolling, std::nullopt);
-    } else if (m_pendingState.position)
+        m_lastPositionForScrolling = position;
+    } else if (m_pendingState.position) {
         position = *std::exchange(m_pendingState.position, std::nullopt);
+        // A layout position that disagrees with what the scrolling tree last set moves the
+        // layer away from the scrolled position until the scrolling tree sets it again.
+        if (m_lastPositionForScrolling && *m_lastPositionForScrolling != *position && m_position != *position)
+            WPE_TRACE_INSTANT("scroll: main thread position overrides scrolling tree by %.1f,%.1f%s", position->x() - m_lastPositionForScrolling->x(), position->y() - m_lastPositionForScrolling->y(), m_tracesScrollPosition ? " (root contents)" : "");
+    }
 
     std::optional<FloatPoint> boundsOrigin;
     if (m_pendingState.boundsOriginForScrolling) {
@@ -1071,6 +1098,8 @@ void CoordinatedPlatformLayer::flushPositionChanges(const OptionSet<CompositionR
     auto applyPositionChanges = [this](auto& layer) {
         assertIsHeld(m_lock);
         if (m_pendingChanges.contains(Change::Position)) {
+            if (m_tracesScrollPosition)
+                WPE_TRACE_COUNTER("wpe.scroll.drawn-y", static_cast<int64_t>(-m_position.y() * 100));
             layer.setPosition(m_position);
             m_pendingChanges.remove(Change::Position);
         }
@@ -1536,17 +1565,19 @@ bool CoordinatedPlatformLayer::hasPendingBackingStoreTileUpdates() const
     return false;
 }
 
-void CoordinatedPlatformLayer::processPendingBackingStoreTileUpdates()
+void CoordinatedPlatformLayer::processPendingBackingStoreTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget)
 {
     ASSERT(!isMainThread());
 
 #if USE(TEXTURE_MAPPER)
+    UNUSED_PARAM(nearMargin);
+    UNUSED_PARAM(tileBudget);
     Locker locker { m_lock };
     if (m_backingStore)
         m_backingStore->processPendingUpdates();
 #else
     if (m_target) {
-        m_target->processPendingTileUpdates();
+        m_target->processPendingTileUpdates(nearMargin, tileBudget);
         return;
     }
 #endif

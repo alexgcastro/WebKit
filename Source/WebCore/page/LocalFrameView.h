@@ -318,6 +318,11 @@ public:
     std::optional<LayoutRect> layoutViewportOverrideRect() const { return m_layoutViewportOverrideRect; }
 
     WEBCORE_EXPORT void LEGACY_NODELETE setVisualViewportOverrideRect(std::optional<LayoutRect>);
+    // The exact, possibly fractional, scroll position of the scrolling tree. The visual (and so
+    // the layout) viewport follows it while it rounds to scrollPosition(), so that fixed elements
+    // are laid out and snapped against the viewport the scrolling tree moves the contents to.
+    void setScrollingTreeScrollPosition(std::optional<FloatPoint>);
+    void updateLayoutViewportForScrollingTreePosition() { updateLayoutViewport(); }
     std::optional<LayoutRect> visualViewportOverrideRect() const { return m_visualViewportOverrideRect; }
 
     // These are in document coordinates, unaffected by page scale (but affected by zooming).
@@ -1062,6 +1067,7 @@ private:
     LayoutPoint m_layoutViewportOrigin;
     std::optional<LayoutRect> m_layoutViewportOverrideRect;
     std::optional<LayoutRect> m_visualViewportOverrideRect; // Used when the iOS keyboard is showing.
+    std::optional<FloatPoint> m_scrollingTreeScrollPosition;
 
     std::optional<FloatRect> m_viewExposedRect;
     std::optional<IntRect> m_visibleRectFromParentFrameProcess;

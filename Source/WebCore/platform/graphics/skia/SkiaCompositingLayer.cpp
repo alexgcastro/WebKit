@@ -176,10 +176,10 @@ bool SkiaCompositingLayer::hasPendingBackingStoreTileUpdates() const
     return m_backingStore ? m_backingStore->hasPendingTileUpdates() : false;
 }
 
-void SkiaCompositingLayer::processPendingTileUpdates()
+void SkiaCompositingLayer::processPendingTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget)
 {
     if (m_backingStore)
-        m_backingStore->processPendingTileUpdates();
+        m_backingStore->processPendingTileUpdates(nearMargin, tileBudget);
 }
 
 void SkiaCompositingLayer::setImageBackingStore(CoordinatedImageBackingStore* imageBackingStore)

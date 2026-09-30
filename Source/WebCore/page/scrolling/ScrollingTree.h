@@ -111,6 +111,8 @@ public:
 
     bool isUserScrollInProgressForNode(std::optional<ScrollingNodeID>);
     void setUserScrollInProgressForNode(ScrollingNodeID, bool);
+    bool hasNodesWithActiveUserScrolls();
+    HashSet<ScrollingNodeID> nodesWithActiveUserScrolls();
     WEBCORE_EXPORT virtual void clearNodesWithUserScrollInProgress();
 
     bool isScrollSnapInProgressForNode(std::optional<ScrollingNodeID>);

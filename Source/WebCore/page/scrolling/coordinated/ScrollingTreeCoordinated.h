@@ -60,6 +60,11 @@ private:
 #endif
 #if ENABLE(COORDINATED_TOUCH_EVENTS)
     TrackingType eventTrackingTypeForTouchEvent(const PlatformTouchEvent&) final;
+    void serviceResampledInput(MonotonicTime) final WTF_REQUIRES_LOCK(m_treeLock);
+
+public:
+    void requestCompositionForResampledInput();
+private:
 
     struct TouchEventTracking {
         TrackingType touchForceChangedTracking { TrackingType::NotTracking };

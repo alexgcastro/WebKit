@@ -110,7 +110,7 @@ public:
     void setUseBackingStore(bool, CoordinatedAnimatedBackingStoreClient* = nullptr);
     void updateBackingStore(CoordinatedBackingStoreProxy::Update&&, float);
     bool hasPendingBackingStoreTileUpdates() const;
-    void processPendingTileUpdates();
+    void processPendingTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget);
     void setImageBackingStore(CoordinatedImageBackingStore*);
     void setContentsBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
     std::unique_ptr<CoordinatedPlatformLayerBuffer> takeContentsBuffer();

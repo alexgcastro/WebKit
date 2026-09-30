@@ -26,6 +26,7 @@
 #pragma once
 
 #if USE(COORDINATED_GRAPHICS)
+#include <WebCore/PageIdentifier.h>
 #include <WebCore/CoordinatedCompositionReason.h>
 #include <WebCore/Damage.h>
 #include <WebCore/DisplayUpdate.h>
@@ -129,6 +130,7 @@ private:
 
     void scheduleUpdateLocked();
     void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+    void rasterizeDeferredTiles();
     void renderLayerTree();
     TargetContents paintToCurrentGLContext(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
 #if USE(TEXTURE_MAPPER)
@@ -157,6 +159,7 @@ private:
 
     const Ref<WorkQueue> m_workQueue;
     CheckedPtr<LayerTreeHost> m_layerTreeHost;
+    WebCore::PageIdentifier m_pageID;
     RefPtr<AcceleratedSurface> m_surface;
     RefPtr<CoordinatedSceneState> m_sceneState;
 #if USE(TEXTURE_MAPPER)
@@ -168,6 +171,7 @@ private:
 
     int m_maxTextureSize { 0 };
     std::atomic<unsigned> m_suspendedCount { 0 };
+    bool m_hasDeferredTileUpdates { false };
 
     enum class State {
         Idle,

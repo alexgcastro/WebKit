@@ -63,6 +63,8 @@ public:
     virtual void handleKeyboardScrollRequest(const RequestedKeyboardScrollData&) { }
 
     virtual FloatPoint adjustedScrollPosition(const FloatPoint& scrollPosition) const { return scrollPosition; }
+    // Applies resampled user scroll input for the frame at the given time (see ScrollingTreeCoordinated).
+    virtual bool serviceResampledInput(MonotonicTime) { return false; }
     virtual String scrollbarStateForOrientation(ScrollbarOrientation) const { return ""_s; }
 
     virtual Vector<PlatformLayerContainer, 2> hitTestableScrollbarLayers() const { return { }; }

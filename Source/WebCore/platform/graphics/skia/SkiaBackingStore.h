@@ -55,7 +55,10 @@ public:
     bool requiresStrictSourceConstraint(SkSamplingOptions sampling) const { return sampling.filter == SkFilterMode::kLinear && m_hasPaddedTiles; }
 
     void update(const FloatSize&, float scale, CoordinatedBackingStoreProxy::Update&&);
-    void processPendingTileUpdates();
+    // Applies the pending updates of the tiles within nearMargin (a fraction of the viewport)
+    // of the area painted last frame, and at most tileBudget of the others, nearest first. The
+    // rest stay pending.
+    void processPendingTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget);
 
     void paintToCanvas(SkCanvas&, const SkPaint&, const SkiaDamageRegion* = nullptr);
     void appendImageSetEntries(SkCanvas&, const SkMatrix& ctm, size_t matrixIndex, float opacity, bool enableAntialias, Vector<SkCanvas::ImageSetEntry>& images, const SkiaDamageRegion* = nullptr) const;
@@ -79,6 +82,9 @@ private:
 
         void scheduleUpdate(const IntRect& dirtyRect, const IntRect& tileRect, CoordinatedTileBuffer&);
         void processPendingUpdateIfNeeded();
+        bool hasPendingUpdates() const { return !m_pendingUpdates.isEmpty(); }
+        // The rect the tile will cover once its pending updates are applied.
+        FloatRect pendingRect() const;
 
         const FloatRect& rect() const LIFETIME_BOUND { return m_rect; }
         sk_sp<SkImage> image() const;
@@ -110,6 +116,8 @@ private:
     float m_scale { 1. };
     bool m_hasPendingTileUpdates { false };
     bool m_hasPaddedTiles { false };
+    // The viewport in layer coordinates, as of the last frame that painted this layer.
+    mutable std::optional<FloatRect> m_visibleRect;
 };
 
 } // namespace WebCore

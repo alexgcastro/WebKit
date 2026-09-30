@@ -124,6 +124,8 @@ public:
 
     void setPosition(FloatPoint&&) WTF_REQUIRES_LOCK(m_lock);
     void setPositionForScrolling(const FloatPoint&);
+    void setTracesScrollPosition();
+    float contentsScaleForScrolling();
     const FloatPoint& position() const WTF_REQUIRES_LOCK(m_lock);
     void setTopLeftPositionForScrolling(const FloatPoint&);
     FloatPoint topLeftPositionForScrolling();
@@ -217,9 +219,14 @@ public:
 
     bool hasPendingTilesCreation() const { assertIsMainThread(); return m_pendingTilesCreation; }
     bool hasPendingBackingStoreTileUpdates() const;
-    void processPendingBackingStoreTileUpdates();
+    // Tiles within nearMargin of the viewport are always applied, at most tileBudget of the
+    // others; both are only honoured by the Skia compositor, which otherwise applies everything.
+    void processPendingBackingStoreTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget);
     bool isCompositionRequiredOrOngoing() const;
     void requestComposition(CompositionReason);
+    // Asks for a frame even though no layer changed yet: resampled scroll input is only
+    // applied when the frame is sampled. Only for an active scroll, when the client is alive.
+    void requestCompositionFromScrolling(CompositionReason);
     RunLoop* compositingRunLoop() const;
     int maxTextureSize() const;
 
@@ -379,6 +386,11 @@ private:
 #if ENABLE(SCROLLING_THREAD)
     Markable<ScrollingNodeID> m_scrollingNodeID WTF_GUARDED_BY_LOCK(m_lock);
 #endif
+
+    // Tracing: the last position the scrolling tree gave this layer, and whether this is the
+    // root scrolled contents layer whose drawn position is emitted as a counter.
+    std::optional<FloatPoint> m_lastPositionForScrolling WTF_GUARDED_BY_LOCK(m_lock);
+    bool m_tracesScrollPosition WTF_GUARDED_BY_LOCK(m_lock) { false };
 
     struct {
         std::optional<FloatPoint> position;

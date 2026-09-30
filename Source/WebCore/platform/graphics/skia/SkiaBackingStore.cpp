@@ -76,18 +76,58 @@ void SkiaBackingStore::update(const FloatSize& size, float scale, CoordinatedBac
     }
 }
 
-void SkiaBackingStore::processPendingTileUpdates()
+void SkiaBackingStore::processPendingTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget)
 {
     if (!m_hasPendingTileUpdates)
         return;
 
-    m_hasPaddedTiles = false;
+    // Replaying a tile's display list is the expensive part of a composite. Tiles near what
+    // was on screen last frame (within nearMargin, a fraction of the viewport) are applied
+    // unconditionally; the others, nearest first, only while tileBudget lasts. Without a
+    // nearMargin nothing is applied unconditionally: that is the pass that runs after a frame
+    // has been presented. A layer never painted yet has no viewport and applies everything.
+    Vector<std::pair<float, Tile*>, 16> deferred;
     for (auto& tile : m_tiles.values()) {
-        tile.processPendingUpdateIfNeeded();
-        m_hasPaddedTiles |= tile.isPadded();
+        if (!tile.hasPendingUpdates())
+            continue;
+        if (!m_visibleRect) {
+            tile.processPendingUpdateIfNeeded();
+            continue;
+        }
+        auto rect = tile.pendingRect();
+        if (nearMargin) {
+            auto nearRect = *m_visibleRect;
+            nearRect.inflate(std::max(m_visibleRect->width(), m_visibleRect->height()) * *nearMargin);
+            if (nearRect.intersects(rect)) {
+                tile.processPendingUpdateIfNeeded();
+                continue;
+            }
+        }
+        auto distance = std::hypot(rect.center().x() - m_visibleRect->center().x(), rect.center().y() - m_visibleRect->center().y());
+        deferred.append({ distance, &tile });
     }
 
-    m_hasPendingTileUpdates = false;
+    std::sort(deferred.begin(), deferred.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    size_t processed = 0;
+    for (; processed < deferred.size() && tileBudget; ++processed, --tileBudget)
+        deferred[processed].second->processPendingUpdateIfNeeded();
+
+    WPE_TRACE_COUNTER("wpe.tiles.deferred", deferred.size() - processed);
+
+    m_hasPaddedTiles = false;
+    for (auto& tile : m_tiles.values())
+        m_hasPaddedTiles |= tile.isPadded();
+
+    m_hasPendingTileUpdates = processed < deferred.size();
+}
+
+static std::optional<FloatRect> viewportInLayerCoordinates(SkCanvas& canvas)
+{
+    SkMatrix inverse;
+    if (!canvas.getLocalToDeviceAs3x3().invert(&inverse))
+        return std::nullopt;
+    auto size = canvas.getBaseLayerSize();
+    return FloatRect(inverse.mapRect(SkRect::MakeWH(size.width(), size.height())));
 }
 
 static inline bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect)
@@ -137,6 +177,7 @@ void SkiaBackingStore::paintToCanvas(SkCanvas& canvas, const SkPaint& paint, con
     // are far apart.
 
     FloatRect layerRect = { { }, m_size };
+    m_visibleRect = viewportInLayerCoordinates(canvas);
 
     const auto ctm = canvas.getLocalToDeviceAs3x3();
     const auto sampling = samplingOptionsForMatrix(ctm);
@@ -189,6 +230,7 @@ void SkiaBackingStore::appendImageSetEntries(SkCanvas& canvas, const SkMatrix& c
 
     SkAutoCanvasRestore autoRestore(&canvas, true);
     canvas.concat(ctm);
+    m_visibleRect = viewportInLayerCoordinates(canvas);
 
     const auto localClipBounds = canvas.getLocalClipBounds();
     for (auto& tile : m_tiles.values()) {
@@ -230,6 +272,15 @@ void SkiaBackingStore::drawDebugBorders(SkCanvas& canvas, const SkPaint& paint)
 void SkiaBackingStore::Tile::scheduleUpdate(const IntRect& dirtyRect, const IntRect& tileRect, CoordinatedTileBuffer& buffer)
 {
     m_pendingUpdates.append({ tileRect, dirtyRect, Ref { buffer } });
+}
+
+FloatRect SkiaBackingStore::Tile::pendingRect() const
+{
+    if (m_pendingUpdates.isEmpty())
+        return m_rect;
+    FloatRect rect(m_pendingUpdates.last().tileRect);
+    rect.scale(1. / m_scale);
+    return rect;
 }
 
 void SkiaBackingStore::Tile::processPendingUpdateIfNeeded()

@@ -55,7 +55,13 @@ public:
 
     bool flush();
     void flushPendingState();
-    void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+    // Returns true when tile updates were held back for a later frame, which then has to be
+    // scheduled for them to be applied.
+    bool flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+    // Applies some of the tile updates held back by flushCompositingState(), to be called once
+    // the frame has been handed over. Returns true if some are still pending.
+    bool rasterizeDeferredTiles();
+    static bool rasterizesTilesAfterFrame();
     void invalidate();
 
     void invalidateCommittedLayers();

@@ -49,12 +49,20 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #endif
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
+#include <wtf/FileSystem.h>
 #include <wtf/MemoryPressureHandler.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/RAMSize.h>
 #include <wtf/SystemTracing.h>
+#include <wtf/SHA1.h>
 #include <wtf/ThreadSafeWeakPtr.h>
+#include <wtf/WorkQueue.h>
+#include <wtf/text/MakeString.h>
 #include <wtf/text/StringToIntegerConversion.h>
+
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
 
 #if USE(LIBDRM)
 #include <fcntl.h>
@@ -66,29 +74,171 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 namespace WebCore {
 
 #if OS(ANDROID)
-class ProgramCompilationTracer final : public GrContextOptions::PersistentCache {
+// GPU program cache shared by every GrDirectContext in the process and kept on disk.
+//
+// Each thread that paints or composites with Skia gets its own GrDirectContext, and without
+// a cache every one of them compiles every program it needs from scratch, on every run. On
+// Mali a compile costs around 13ms and they land inside the compositor's flush(), mostly
+// on frames that bring in new tiles, which is what drops frames during a fling. Skia hands
+// over the driver's program binary (kBackendBinary), so a hit skips the compile entirely.
+//
+// The whole directory is read when the first context is created, so load() never touches
+// the disk; new programs are written from a background queue.
+//
+// debug.wpe.skia.programcache: "off" (no cache, the upstream behaviour), "memory" (shared
+// between contexts only) or unset/"disk".
+class PersistentProgramCache final : public GrContextOptions::PersistentCache {
 public:
-    sk_sp<SkData> load(const SkData&) final
+    enum class Mode { Off, Memory, Disk };
+
+    static Mode mode()
     {
-        WPE_TRACE_COUNTER("wpe.skia.program-lookups", ++m_lookups);
-        return nullptr;
+        static const Mode mode = [] {
+            char value[PROP_VALUE_MAX] = { };
+            if (__system_property_get("debug.wpe.skia.programcache", value) > 0) {
+                if (!strcmp(value, "off") || !strcmp(value, "0"))
+                    return Mode::Off;
+                if (!strcmp(value, "memory"))
+                    return Mode::Memory;
+            }
+            return Mode::Disk;
+        }();
+        return mode;
     }
 
-    void store(const SkData&, const SkData& data, const SkString& description) final
+    static PersistentProgramCache& singleton()
+    {
+        static NeverDestroyed<PersistentProgramCache> cache;
+        return cache.get();
+    }
+
+    sk_sp<SkData> load(const SkData& key) final
+    {
+        Locker locker { m_lock };
+        auto it = m_programs.find(fileNameForKey(key));
+        if (it == m_programs.end() || it->value.key->size() != key.size() || memcmp(it->value.key->data(), key.data(), key.size())) {
+            WPE_TRACE_COUNTER("wpe.skia.program-cache-misses", ++m_misses);
+            return nullptr;
+        }
+        WPE_TRACE_COUNTER("wpe.skia.program-cache-hits", ++m_hits);
+        return it->value.data;
+    }
+
+    void store(const SkData& key, const SkData& data, const SkString& description) final
     {
         WPE_TRACE_INSTANT("skia: compiled a GPU program (%zu bytes) %s", data.size(), description.c_str());
         WPE_TRACE_COUNTER("wpe.skia.programs-compiled", ++m_compilations);
+
+        auto fileName = fileNameForKey(key);
+        auto keyCopy = SkData::MakeWithCopy(key.data(), key.size());
+        auto dataCopy = SkData::MakeWithCopy(data.data(), data.size());
+        {
+            Locker locker { m_lock };
+            m_programs.set(fileName, Entry { keyCopy, dataCopy });
+        }
+
+        if (m_directory.isNull())
+            return;
+
+        // File layout: key size (uint32), key, program.
+        Vector<uint8_t> contents;
+        uint32_t keySize = key.size();
+        contents.append(std::span { reinterpret_cast<const uint8_t*>(&keySize), sizeof(keySize) });
+        contents.append(std::span { keyCopy->bytes(), keyCopy->size() });
+        contents.append(std::span { dataCopy->bytes(), dataCopy->size() });
+        m_writeQueue->dispatch([path = FileSystem::pathByAppendingComponent(m_directory, fileName), contents = WTF::move(contents)] {
+            auto temporaryPath = makeString(path, ".tmp"_s);
+            if (FileSystem::overwriteEntireFile(temporaryPath, contents.span()))
+                FileSystem::moveFile(temporaryPath, path);
+        });
     }
 
 private:
-    std::atomic<int64_t> m_lookups { 0 };
+    friend class NeverDestroyed<PersistentProgramCache>;
+
+    struct Entry {
+        sk_sp<SkData> key;
+        sk_sp<SkData> data;
+    };
+
+    PersistentProgramCache()
+        : m_writeQueue(WorkQueue::create("org.webkit.SkiaProgramCache"_s, WorkQueue::QOS::Background))
+    {
+        if (mode() != Mode::Disk)
+            return;
+
+        auto base = FileSystem::userCacheDirectory();
+        if (base.isEmpty())
+            return;
+        m_directory = FileSystem::pathByAppendingComponent(base, "wpe-skia-programs"_s);
+        if (!FileSystem::makeAllDirectories(m_directory)) {
+            m_directory = { };
+            return;
+        }
+
+        WPE_TRACE_SCOPE("skia: load program cache");
+        size_t bytes = 0;
+        for (auto& fileName : FileSystem::listDirectory(m_directory)) {
+            if (fileName.endsWith(".tmp"_s))
+                continue;
+            auto contents = FileSystem::readEntireFile(FileSystem::pathByAppendingComponent(m_directory, fileName));
+            if (!contents || contents->size() < sizeof(uint32_t))
+                continue;
+            uint32_t keySize;
+            memcpy(&keySize, contents->span().data(), sizeof(keySize));
+            if (contents->size() <= sizeof(uint32_t) + keySize)
+                continue;
+            auto bytesAfterSize = contents->span().subspan(sizeof(uint32_t));
+            auto keyBytes = bytesAfterSize.first(keySize);
+            auto programBytes = bytesAfterSize.subspan(keySize);
+            m_programs.set(fileName, Entry {
+                SkData::MakeWithCopy(keyBytes.data(), keyBytes.size()),
+                SkData::MakeWithCopy(programBytes.data(), programBytes.size())
+            });
+            bytes += contents->size();
+        }
+        WPE_TRACE_INSTANT("skia: program cache loaded, %u programs, %zu bytes", m_programs.size(), bytes);
+    }
+
+    static String fileNameForKey(const SkData& key)
+    {
+        SHA1 sha1;
+        sha1.addBytes(std::span { key.bytes(), key.size() });
+        return String::fromLatin1(sha1.computeHexDigest().data());
+    }
+
+    Lock m_lock;
+    HashMap<String, Entry> m_programs WTF_GUARDED_BY_LOCK(m_lock);
+    String m_directory;
+    Ref<WorkQueue> m_writeQueue;
+    std::atomic<int64_t> m_hits { 0 };
+    std::atomic<int64_t> m_misses { 0 };
     std::atomic<int64_t> m_compilations { 0 };
 };
 
-static ProgramCompilationTracer& programCompilationTracer()
+static bool reducedShaderVariationsRequested()
 {
-    static NeverDestroyed<ProgramCompilationTracer> tracer;
-    return tracer.get();
+    static const bool requested = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.skia.reducedvariants", value) > 0 && !strcmp(value, "1");
+    }();
+    return requested;
+}
+
+// Skia's small-path renderer turns every antialiased path into a distance field on the CPU,
+// and tiles are recorded as DDLs, so that work happens when the tile is replayed: inside the
+// compositor's flush(), on the frame that needed to present. It was the largest single cost
+// of the composites that drop frames during a fling. Chrome and Android's HWUI both disable
+// it; paths then take the triangulating or software renderer, and the software renderer draws
+// its mask while the DDL is recorded, on the painting thread. debug.wpe.skia.dfpaths=1
+// restores the upstream behaviour.
+static bool distanceFieldPathsRequested()
+{
+    static const bool requested = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.skia.dfpaths", value) > 0 && !strcmp(value, "1");
+    }();
+    return requested;
 }
 #endif
 
@@ -367,17 +517,12 @@ private:
         if (!glContext || !glContext->makeContextCurrent())
             return;
 
-        // FIXME: Add shader cache.
         GrContextOptions options;
 #if OS(ANDROID)
-        // Not a cache: load() always misses, exactly as today with no cache at all, so the
-        // engine behaves the same. It is here because Skia calls store() precisely when it
-        // has compiled a new program, which is the only way to see program compilation in a
-        // trace. Observing it is not free - Skia fetches the compiled binary to hand over,
-        // which on Mali roughly tripled the worst composite - so it is behind
-        // debug.wpe.atrace=shaders and the timing of the stores is the signal, not the cost.
-        if (WTF::ATraceAnnotator::shaderTracingRequested())
-            options.fPersistentCache = &programCompilationTracer();
+        if (PersistentProgramCache::mode() != PersistentProgramCache::Mode::Off)
+            options.fPersistentCache = &PersistentProgramCache::singleton();
+        options.fReducedShaderVariations = reducedShaderVariationsRequested();
+        options.fDisableDistanceFieldPaths = !distanceFieldPathsRequested();
 #endif
         options.fAllowMSAAOnNewIntel = shouldAllowMSAAOnNewIntel();
         // Skia defaults this to true, which alters the texture2D() calls in all generated shaders,

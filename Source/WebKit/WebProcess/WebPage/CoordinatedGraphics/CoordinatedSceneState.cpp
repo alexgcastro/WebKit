@@ -31,6 +31,10 @@
 #include <wtf/MainThread.h>
 #include <wtf/TZoneMallocInlines.h>
 
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 namespace WebKit {
 using namespace WebCore;
 
@@ -125,7 +129,79 @@ void CoordinatedSceneState::commitPendingLayers()
         m_committedLayers = WTF::move(m_pendingLayers);
 }
 
-void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionReason>& reasons)
+#if OS(ANDROID)
+static std::optional<float> floatProperty(const char* name)
+{
+    char value[PROP_VALUE_MAX] = { };
+    if (__system_property_get(name, value) > 0)
+        return static_cast<float>(atof(value));
+    return std::nullopt;
+}
+#endif
+
+// Tiles away from the viewport are rasterized after a frame has been handed over rather than
+// inside it: a composite that replays even one or two tiles already misses the display
+// deadline, and the compositor is otherwise idle for most of each frame.
+// debug.wpe.tiles.postframe=0 applies every tile in the frame again (upstream), optionally
+// bounded by debug.wpe.tiles.budget.
+struct TileSchedule {
+    bool postFrame { true };
+    float nearMargin { 0.15 }; // debug.wpe.tiles.margin: fraction of the viewport applied in the frame.
+    unsigned budget { 2 }; // debug.wpe.tiles.budget: tiles per pass beyond the near ones, 0 = no limit.
+};
+
+static const TileSchedule& tileSchedule()
+{
+    static const TileSchedule schedule = [] {
+        TileSchedule schedule;
+#if OS(ANDROID)
+        if (auto postFrame = floatProperty("debug.wpe.tiles.postframe"))
+            schedule.postFrame = *postFrame;
+        if (!schedule.postFrame) {
+            schedule.nearMargin = 0.5;
+            schedule.budget = 0;
+        }
+        if (auto margin = floatProperty("debug.wpe.tiles.margin"))
+            schedule.nearMargin = *margin;
+        if (auto budget = floatProperty("debug.wpe.tiles.budget"))
+            schedule.budget = *budget;
+#else
+        schedule.postFrame = false;
+        schedule.budget = 0;
+#endif
+        return schedule;
+    }();
+    return schedule;
+}
+
+static unsigned budgetOrUnlimited(unsigned budget)
+{
+    return budget ? budget : std::numeric_limits<unsigned>::max();
+}
+
+bool CoordinatedSceneState::rasterizesTilesAfterFrame()
+{
+    return tileSchedule().postFrame;
+}
+
+bool CoordinatedSceneState::rasterizeDeferredTiles()
+{
+    ASSERT(!isMainRunLoop());
+    if (!tileSchedule().postFrame)
+        return false;
+
+    unsigned tileBudget = budgetOrUnlimited(tileSchedule().budget);
+    bool hasDeferredTileUpdates = false;
+    for (auto& layer : m_committedLayers) {
+        if (!layer->hasPendingBackingStoreTileUpdates())
+            continue;
+        layer->processPendingBackingStoreTileUpdates(std::nullopt, tileBudget);
+        hasDeferredTileUpdates |= layer->hasPendingBackingStoreTileUpdates();
+    }
+    return hasDeferredTileUpdates;
+}
+
+bool CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionReason>& reasons)
 {
     commitPendingLayers();
 
@@ -144,8 +220,14 @@ void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionRea
             layersWithPendingTileUpdates.append(Ref { layer });
     }
 
-    for (auto& layer : layersWithPendingTileUpdates)
-        layer->processPendingBackingStoreTileUpdates();
+    const auto& schedule = tileSchedule();
+    unsigned tileBudget = schedule.postFrame ? 0 : budgetOrUnlimited(schedule.budget);
+    bool hasDeferredTileUpdates = false;
+    for (auto& layer : layersWithPendingTileUpdates) {
+        layer->processPendingBackingStoreTileUpdates(schedule.nearMargin, tileBudget);
+        hasDeferredTileUpdates |= layer->hasPendingBackingStoreTileUpdates();
+    }
+    return hasDeferredTileUpdates;
 }
 
 void CoordinatedSceneState::invalidateCommittedLayers()

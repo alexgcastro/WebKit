@@ -29,6 +29,8 @@
 #include "config.h"
 #include "ScrollingTreeFixedNodeCoordinated.h"
 
+#include "ScrollingTreeFrameScrollingNode.h"
+
 #if ENABLE(ASYNC_SCROLLING) && USE(COORDINATED_GRAPHICS)
 #include "CoordinatedPlatformLayer.h"
 #include "Logging.h"
@@ -68,7 +70,20 @@ void ScrollingTreeFixedNodeCoordinated::applyLayerPositions()
 
     LOG_WITH_STREAM(Scrolling, stream << "ScrollingTreeFixedNode " << scrollingNodeID() << " relatedNodeScrollPositionDidChange: viewportRectAtLastLayout " << m_constraints.viewportRectAtLastLayout() << " last layer pos " << m_constraints.layerPositionAtLastLayout() << " layerPosition " << layerPosition);
 
-    m_layer->setTopLeftPositionForScrolling(layerPosition - m_constraints.alignmentOffset());
+    auto topLeft = layerPosition - m_constraints.alignmentOffset();
+
+    // The layout viewport is kept in LayoutUnits (1/64 of a CSS pixel). When the scrolling tree
+    // positions the contents between CSS pixels, that truncation leaves the fixed layer a varying
+    // few hundredths of a device pixel off, which the compositor's filtering shows as shimmer.
+    // While the layout viewport follows the scroll position, take the truncation back out.
+    if (RefPtr frameNode = dynamicDowncast<ScrollingTreeFrameScrollingNode>(parent())) {
+        auto quantization = frameNode->layoutViewport().location() - frameNode->currentScrollPosition();
+        constexpr float layoutUnit = 1.f / 64;
+        if (std::abs(quantization.width()) < layoutUnit && std::abs(quantization.height()) < layoutUnit)
+            topLeft -= quantization;
+    }
+
+    m_layer->setTopLeftPositionForScrolling(topLeft);
 }
 
 void ScrollingTreeFixedNodeCoordinated::dumpProperties(TextStream& ts, OptionSet<ScrollingStateTreeAsTextBehavior> behavior) const

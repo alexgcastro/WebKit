@@ -43,6 +43,10 @@
 #include <ranges>
 #include <wtf/SystemTracing.h>
 
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 namespace WebCore {
 
 Ref<ScrollingTreeCoordinated> ScrollingTreeCoordinated::create(AsyncScrollingCoordinator& scrollingCoordinator)
@@ -79,6 +83,20 @@ Ref<ScrollingTreeNode> ScrollingTreeCoordinated::createScrollingTreeNode(Scrolli
     }
 
     RELEASE_ASSERT_NOT_REACHED();
+}
+
+void ScrollingTreeCoordinated::requestCompositionForResampledInput()
+{
+    if (auto* rootScrollingNode = rootNode())
+        static_cast<ScrollingTreeFrameScrollingNodeCoordinated*>(rootScrollingNode)->rootContentsLayer()->requestCompositionFromScrolling(CompositionReason::AsyncScrolling);
+}
+
+void ScrollingTreeCoordinated::serviceResampledInput(MonotonicTime frameTime)
+{
+    for (auto nodeID : nodesWithActiveUserScrolls()) {
+        if (RefPtr node = dynamicDowncast<ScrollingTreeScrollingNode>(nodeForID(nodeID)))
+            node->serviceResampledInput(frameTime);
+    }
 }
 
 void ScrollingTreeCoordinated::applyLayerPositionsInternal()
@@ -367,6 +385,27 @@ static TrackingType mergeTrackingTypes(TrackingType a, TrackingType b)
     return a;
 }
 
+static bool scrollBlockingEventType(EventTrackingRegions::EventType eventType)
+{
+    using Type = EventTrackingRegions::EventType;
+    return eventType == Type::Touchstart || eventType == Type::Touchmove || eventType == Type::Touchend || eventType == Type::Touchforcechange;
+}
+
+// debug.wpe.touch.blockingpointer=1 restores the upstream classification, where a non-passive
+// pointer or mouse listener makes the whole touch sequence synchronous.
+static bool blockingPointerListenersRequested()
+{
+#if OS(ANDROID)
+    static const bool requested = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.touch.blockingpointer", value) > 0 && !strcmp(value, "1");
+    }();
+    return requested;
+#else
+    return true;
+#endif
+}
+
 TrackingType ScrollingTreeCoordinated::eventTrackingTypeForTouchEvent(const PlatformTouchEvent& event)
 {
     auto offset = mainFrameScrollOffset();
@@ -396,6 +435,14 @@ TrackingType ScrollingTreeCoordinated::eventTrackingTypeForTouchEvent(const Plat
                 return;
 
             auto trackingTypeForLocation = eventRegion.eventTrackingTypeForPoint(eventType, roundedIntPoint(layerAndPoint->second));
+            // Only a touch event can cancel a scroll: preventing the default of a pointer,
+            // mouse or gesture event does not stop panning (that is what touch-action is for),
+            // so their listeners must not make the gesture wait for the main thread. They are
+            // still dispatched, just without holding the scroll. This is what Chrome does.
+            if (trackingTypeForLocation == TrackingType::Synchronous && !scrollBlockingEventType(eventType) && !blockingPointerListenersRequested()) {
+                WPE_TRACE_INSTANT("touch: non-passive %s listener dispatched without blocking the scroll", EventTrackingRegions::eventName(eventType).characters());
+                trackingTypeForLocation = TrackingType::Asynchronous;
+            }
             // Naming the event type that forces the sequence synchronous is the whole
             // point: it is what a page has to drop, or make passive, to scroll async.
             if (trackingTypeForLocation == TrackingType::Synchronous)

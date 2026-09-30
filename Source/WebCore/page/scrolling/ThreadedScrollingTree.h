@@ -54,6 +54,19 @@ public:
     bool handleWheelEventAfterMainThread(const PlatformWheelEvent&, ScrollingNodeID, std::optional<WheelScrollGestureState>);
     void wheelEventWasProcessedByMainThread(const PlatformWheelEvent&, std::optional<WheelScrollGestureState>);
 
+    // Samples the running scroll animations and moves the layers, for a composite that is
+    // about to start: every frame then shows the animation at the same phase instead of
+    // depending on whether the display refresh reached the scrolling thread first.
+    WEBCORE_EXPORT bool hasActiveScrollAnimations();
+    bool scrollingThreadDrivesFrames();
+
+protected:
+    // Applies resampled user scroll input (touch drags) for the frame sampled at the given time.
+    virtual void serviceResampledInput(MonotonicTime) WTF_REQUIRES_LOCK(m_treeLock) { }
+
+public:
+    WEBCORE_EXPORT void serviceScrollAnimationsForComposite();
+
     WEBCORE_EXPORT void willSendEventToMainThread(const PlatformWheelEvent&);
     WEBCORE_EXPORT void waitForEventToBeProcessedByMainThread(const PlatformWheelEvent&);
 

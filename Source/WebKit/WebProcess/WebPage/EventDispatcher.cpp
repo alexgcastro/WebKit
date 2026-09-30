@@ -60,6 +60,11 @@
 #include <WebCore/ScrollingThread.h>
 #include <WebCore/ScrollingTreeNode.h>
 #include <WebCore/ThreadedScrollingTree.h>
+#include <wtf/threads/BinarySemaphore.h>
+
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
 #endif
 
 namespace WebKit {
@@ -330,6 +335,20 @@ static ASCIILiteral trackingTypeName(WebCore::TrackingType type)
     return "?"_s;
 }
 
+// debug.wpe.touch.blockingscroll=1 keeps every event of a synchronous sequence blocking, as upstream.
+static bool blockingScrollingTouchesRequested()
+{
+#if OS(ANDROID)
+    static const bool requested = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.touch.blockingscroll", value) > 0 && !strcmp(value, "1");
+    }();
+    return requested;
+#else
+    return true;
+#endif
+}
+
 void EventDispatcher::dispatchTouchEventViaMainThread(WebCore::PageIdentifier pageID, Ref<WebTouchEvent>&& touchEvent, CompletionHandler<void(WebEventType, bool)>&& completionHandler)
 {
     RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, pageID, touchEvent = WTF::move(touchEvent), completionHandler = WTF::move(completionHandler)] mutable {
@@ -357,6 +376,25 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
 
     auto trackingType = scrollingTree->eventTrackingTypeForTouchEvent(platform(touchEvent));
 
+    // Once a sequence has started scrolling, its remaining events are dispatched without
+    // holding the gesture: blocking on them only delays scroll updates and the fling that
+    // starts at touchend. Chrome makes them uncancelable for the same reason.
+    bool isTouchStart = touchEvent->type() == WebEventType::TouchStart;
+    {
+        Locker locker { m_touchScrollingPagesLock };
+        if (isTouchStart)
+            m_touchScrollingPages.remove(pageID);
+        else if (touchEvent->type() == WebEventType::TouchMove && trackingType != TrackingType::Synchronous) {
+            // A move the page could not prevent has already started the scroll, so a
+            // non-passive touchend listener can no longer cancel it either. Waiting for it
+            // held the fling, and every touch behind it, until the main thread was free.
+            m_touchScrollingPages.add(pageID);
+        } else if (trackingType == TrackingType::Synchronous && m_touchScrollingPages.contains(pageID) && !blockingScrollingTouchesRequested()) {
+            WPE_TRACE_INSTANT("touch: sequence already scrolling, dispatched without blocking");
+            trackingType = TrackingType::Asynchronous;
+        }
+    }
+
     WPE_TRACE_INSTANT("touch %s classified %s", touchEventName(touchEvent->type()).characters(), trackingTypeName(trackingType).characters());
     WPE_TRACE_COUNTER("wpe.touch.blocking", trackingType == TrackingType::Synchronous ? 1 : 0);
 
@@ -376,8 +414,12 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
     auto cookie = WPE_TRACE_ASYNC_COOKIE();
     auto startTime = MonotonicTime::now();
     WPE_TRACE_ASYNC_BEGIN("touch blocked on web process main thread", cookie);
-    dispatchTouchEventViaMainThread(pageID, WTF::move(touchEvent), [cookie, startTime, completionHandler = WTF::move(completionHandler)](WebEventType type, bool handled) mutable {
+    dispatchTouchEventViaMainThread(pageID, WTF::move(touchEvent), [protectedThis = Ref { *this }, pageID, cookie, startTime, completionHandler = WTF::move(completionHandler)](WebEventType type, bool handled) mutable {
         WPE_TRACE_ASYNC_END("touch blocked on web process main thread", cookie);
+        if (type == WebEventType::TouchMove && !handled) {
+            Locker locker { protectedThis->m_touchScrollingPagesLock };
+            protectedThis->m_touchScrollingPages.add(pageID);
+        }
         WPE_TRACE_COUNTER("wpe.touch.main-thread-block-us", (MonotonicTime::now() - startTime).microsecondsAs<int64_t>());
         completionHandler(type, handled);
     });
@@ -417,6 +459,29 @@ void EventDispatcher::dispatchGestureEvent(FrameIdentifier frameID, PageIdentifi
         return completionHandler(gestureEvent.type(), false, std::nullopt);
 
     webPage->gestureEvent(frameID, gestureEvent, WTF::move(completionHandler));
+}
+#endif
+
+#if ENABLE(ASYNC_SCROLLING) && ENABLE(SCROLLING_THREAD)
+void EventDispatcher::serviceScrollAnimationsForComposite(PageIdentifier pageID)
+{
+    RefPtr<ThreadedScrollingTree> scrollingTree;
+    {
+        Locker locker { m_scrollingTreesLock };
+        scrollingTree = m_scrollingTrees.get(pageID);
+    }
+    if (!scrollingTree || !scrollingTree->hasActiveScrollAnimations())
+        return;
+
+    // Bounded, so a scrolling thread that is busy costs this frame a stale position rather
+    // than stalling the compositor.
+    auto semaphore = Box<BinarySemaphore>::create();
+    ScrollingThread::dispatch([scrollingTree, semaphore] {
+        scrollingTree->serviceScrollAnimationsForComposite();
+        semaphore->signal();
+    });
+    if (!semaphore->waitFor(2_ms))
+        WPE_TRACE_INSTANT("scroll: scrolling thread too busy to sample the animation for this composite");
 }
 #endif
 

@@ -37,6 +37,7 @@
 #include "ScrollingThread.h"
 #include "ScrollingTreeScrollingNodeDelegateCoordinated.h"
 #include "ThreadedScrollingTree.h"
+#include <wtf/SystemTracing.h>
 
 namespace WebCore {
 
@@ -109,6 +110,10 @@ void ScrollingTreeFrameScrollingNodeCoordinated::repositionScrollingLayers()
         return;
 
     auto scrollPosition = currentScrollPosition();
+    if (isRootNode()) {
+        scrollLayer->setTracesScrollPosition();
+        WPE_TRACE_COUNTER("wpe.scroll.tree-y", static_cast<int64_t>(scrollPosition.y() * 100));
+    }
     scrollLayer->setPositionForScrolling(-scrollPosition);
 }
 
