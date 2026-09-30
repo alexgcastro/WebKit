@@ -103,7 +103,13 @@ bool ScrollAnimationKinetic::PerAxisData::animateScroll(Seconds elapsedTime)
         m_offset = m_upper;
     }
 
-    if (std::abs(m_velocity) < 1 || (lastTime > 0_s && std::abs(m_offset - lastOffset) < 1)) {
+    // Stop once the motion drops under a pixel per 60 Hz frame. Measuring that as the distance
+    // since the previous call made the end depend on how often the animation is serviced: at
+    // higher refresh rates, or when it is also sampled right before a composite, the fling
+    // stopped abruptly while still moving several pixels per frame.
+    static constexpr double minimumVelocity = 60; // Pixels per second.
+    UNUSED_VARIABLE(lastOffset);
+    if (std::abs(m_velocity) < 1 || (lastTime > 0_s && std::abs(m_velocity) < minimumVelocity)) {
         m_offset = round(m_offset);
         m_velocity = 0;
     }
@@ -210,7 +216,9 @@ bool ScrollAnimationKinetic::retargetActiveAnimation(const FloatPoint&)
 
 void ScrollAnimationKinetic::serviceAnimation(MonotonicTime currentTime)
 {
-    auto elapsedTime = timeSinceStart(currentTime);
+    // Animations are sampled at the vsync that started the frame, which can precede the time
+    // the fling started by up to a frame; moving backwards from the release point would jerk.
+    auto elapsedTime = std::max(0_s, timeSinceStart(currentTime));
 
     if (m_horizontalData && !m_horizontalData.value().animateScroll(elapsedTime))
         m_horizontalData = std::nullopt;

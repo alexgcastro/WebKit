@@ -943,6 +943,18 @@ bool ScrollingTree::isUserScrollInProgressForNode(std::optional<ScrollingNodeID>
     return m_treeState.nodesWithActiveUserScrolls.contains(*nodeID);
 }
     
+HashSet<ScrollingNodeID> ScrollingTree::nodesWithActiveUserScrolls()
+{
+    Locker locker { m_treeStateLock };
+    return m_treeState.nodesWithActiveUserScrolls;
+}
+
+bool ScrollingTree::hasNodesWithActiveUserScrolls()
+{
+    Locker locker { m_treeStateLock };
+    return !m_treeState.nodesWithActiveUserScrolls.isEmpty();
+}
+
 void ScrollingTree::setUserScrollInProgressForNode(ScrollingNodeID nodeID, bool isScrolling)
 {
     Locker locker { m_treeStateLock };

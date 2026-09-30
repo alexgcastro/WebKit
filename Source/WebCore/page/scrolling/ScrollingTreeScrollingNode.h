@@ -103,6 +103,7 @@ public:
     virtual void stopAnimatedScroll(EnumSet<AnimatedScrollType>);
 
     virtual void serviceScrollAnimation(MonotonicTime);
+    void serviceResampledInput(MonotonicTime);
 
     // These are imperative; they adjust the scrolling layers.
     void scrollTo(const FloatPoint&, ScrollType = ScrollType::User, ScrollClamping = ScrollClamping::Clamped);

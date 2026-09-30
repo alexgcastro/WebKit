@@ -43,14 +43,32 @@ public:
     void updateVisibleLengths();
     bool handleWheelEvent(const PlatformWheelEvent&);
 
+    // Applies the finger movement of a touch drag as of the given frame time. Returns true
+    // while there is resampled input still to apply.
+    bool serviceResampledInput(MonotonicTime frameTime) final;
+
 private:
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
     // ThreadedScrollingTreeScrollingNodeDelegate
     void updateFromStateNode(const ScrollingStateScrollingNode&) final;
 #endif
 
+    FloatPoint adjustedScrollPosition(const FloatPoint&) const final;
+
     // ScrollingEffectsControllerClient.
-    bool scrollAnimationEnabled() const final { return m_scrollAnimatorEnabled; }
+    bool scrollAnimationEnabled() const final { return m_scrollAnimatorEnabled && !m_resamplingEventTime; }
+    void immediateScrollBy(const FloatSize&, ScrollClamping = ScrollClamping::Clamped) final;
+
+    void flushResampledInput();
+
+    struct InputSample {
+        MonotonicTime time;
+        FloatSize total;
+    };
+    Vector<InputSample, 8> m_inputSamples;
+    FloatSize m_receivedInput;
+    FloatSize m_appliedInput;
+    std::optional<MonotonicTime> m_resamplingEventTime;
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)

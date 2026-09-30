@@ -26,6 +26,7 @@
 #pragma once
 
 #if USE(COORDINATED_GRAPHICS)
+#include <WebCore/PageIdentifier.h>
 #include <WebCore/CoordinatedCompositionReason.h>
 #include <WebCore/Damage.h>
 #include <WebCore/DisplayUpdate.h>
@@ -160,6 +161,7 @@ private:
 
     const Ref<WorkQueue> m_workQueue;
     CheckedPtr<LayerTreeHost> m_layerTreeHost;
+    WebCore::PageIdentifier m_pageID;
     RefPtr<AcceleratedSurface> m_surface;
     RefPtr<CoordinatedSceneState> m_sceneState;
 #if USE(TEXTURE_MAPPER)

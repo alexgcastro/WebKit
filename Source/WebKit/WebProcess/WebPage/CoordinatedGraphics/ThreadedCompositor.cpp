@@ -48,10 +48,16 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkFontMgr.h>
 #include <skia/core/SkPaint.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#include "EventDispatcher.h"
+#include <wtf/Box.h>
 #include <wtf/SetForScope.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/StringToIntegerConversion.h>
+
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
 
 #if USE(GLIB_EVENT_LOOP)
 #include <wtf/glib/RunLoopSourcePriority.h>
@@ -73,6 +79,20 @@ using namespace WebCore;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ThreadedCompositor);
 
+// debug.wpe.scroll.samplepercomposite=0 leaves scroll animations to the display refresh alone.
+static bool scrollAnimationsSampledPerComposite()
+{
+#if OS(ANDROID)
+    static const bool sampled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.samplepercomposite", value) > 0 && !strcmp(value, "0"));
+    }();
+    return sampled;
+#else
+    return false;
+#endif
+}
+
 Ref<ThreadedCompositor> ThreadedCompositor::create(WebPage& webPage, LayerTreeHost& layerTreeHost, CoordinatedSceneState& sceneState)
 {
     return adoptRef(*new ThreadedCompositor(webPage, layerTreeHost, sceneState));
@@ -81,6 +101,7 @@ Ref<ThreadedCompositor> ThreadedCompositor::create(WebPage& webPage, LayerTreeHo
 ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTreeHost, CoordinatedSceneState& sceneState)
     : m_workQueue(WorkQueue::create("org.webkit.ThreadedCompositor"_s))
     , m_layerTreeHost(&layerTreeHost)
+    , m_pageID(webPage.identifier())
     , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
     , m_sceneState(&sceneState)
 #if USE(TEXTURE_MAPPER)
@@ -677,6 +698,11 @@ void ThreadedCompositor::renderLayerTree()
         if (m_layerTreeHost)
             m_layerTreeHost->willRenderFrame();
     });
+
+#if ENABLE(ASYNC_SCROLLING) && ENABLE(SCROLLING_THREAD)
+    if (scrollAnimationsSampledPerComposite())
+        WebProcess::singleton().eventDispatcher().serviceScrollAnimationsForComposite(m_pageID);
+#endif
 
     WTFBeginSignpost(this, FlushCompositingState);
     flushCompositingState(reasons);

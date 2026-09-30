@@ -66,7 +66,25 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/TextStream.h>
 
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 namespace WebCore {
+
+// Matches debug.wpe.scroll.devicepixelsnap in ScrollingTreeScrollingNodeDelegateCoordinated.
+static bool scrollingTreeUsesFractionalScrollPositions()
+{
+#if OS(ANDROID) && USE(COORDINATED_GRAPHICS)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.devicepixelsnap", value) > 0 && !strcmp(value, "0"));
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(AsyncScrollingCoordinator);
 
@@ -884,6 +902,13 @@ void AsyncScrollingCoordinator::reconcileScrollingState(LocalFrameView& frameVie
 
     std::optional<FloatRect> layoutViewportRect;
 
+    // The scrolling tree may position the contents between CSS pixels (on the device pixel
+    // grid). Lay fixed elements out against that same viewport, as iOS does with the visible
+    // rect it gets from the UI process, or their committed offsets carry this thread's rounding.
+    // Recorded first so that every viewport update below already sees it.
+    if (scrollingTreeUsesFractionalScrollPositions())
+        frameView.setScrollingTreeScrollPosition(scrollPosition);
+
     if (layoutViewportOriginOrOverrideRect) {
         WTF::switchOn(*layoutViewportOriginOrOverrideRect,
             [&frameView](FloatPoint origin) {
@@ -897,6 +922,9 @@ void AsyncScrollingCoordinator::reconcileScrollingState(LocalFrameView& frameVie
     frameView.setScrollClamping(ScrollClamping::Unclamped);
     frameView.notifyScrollPositionChanged(roundedIntPoint(scrollPosition));
     frameView.setScrollClamping(ScrollClamping::Clamped);
+    // The visual viewport only follows the recorded position once scrollPosition() matches it.
+    if (scrollingTreeUsesFractionalScrollPositions())
+        frameView.updateLayoutViewportForScrollingTreePosition();
 
     scrollTypeScope.restore();
 

@@ -44,7 +44,185 @@
 #include <wtf/text/TextStream.h>
 #include <wtf/threads/BinarySemaphore.h>
 
+#if OS(ANDROID)
+#include <android/looper.h>
+#include <dlfcn.h>
+#include <sys/system_properties.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/Threading.h>
+
+struct AChoreographer;
+#endif
+
 namespace WebCore {
+
+#if OS(ANDROID)
+// Vsync timing read straight from Android's Choreographer, on a looper thread of its own.
+//
+// Scroll animations used to be sampled at whatever time the display refresh or the composite
+// happened to be handled, which jitters by a millisecond or two and shows up as uneven steps.
+// Sampling at a point of the vsync grid instead gives every frame exactly one frame period of
+// animation. The vsync that started the current frame is used, as Chrome does with the frame
+// time of a BeginFrame: it is the same for the display refresh and the composite that produce
+// one frame. (Sampling at the next vsync made the first step of a fling cover two frames.)
+class AndroidVSyncClock {
+    WTF_MAKE_NONCOPYABLE(AndroidVSyncClock);
+public:
+    static AndroidVSyncClock& singleton()
+    {
+        static NeverDestroyed<AndroidVSyncClock> clock;
+        return clock.get();
+    }
+
+    // Keeps the clock ticking for a while, so the grid is known before an animation needs it.
+    void keepAlive()
+    {
+        m_wantedUntilNanos.store(nowNanos() + 1'000'000'000);
+        if (!m_callbackPending.load() && m_looper) {
+            m_needsPost.store(true);
+            m_functions.wake(m_looper);
+        }
+    }
+
+    std::optional<MonotonicTime> nextVSync(MonotonicTime now)
+    {
+        keepAlive();
+        int64_t vsync = m_vsyncNanos.load();
+        int64_t period = m_periodNanos.load();
+        if (!vsync || !period)
+            return std::nullopt;
+        int64_t current = static_cast<int64_t>(now.secondsSinceEpoch().value() * 1e9);
+        if (current < vsync || current - vsync > 4 * period)
+            return std::nullopt;
+        int64_t frames = (current - vsync) / period;
+        return MonotonicTime::fromRawSeconds((vsync + frames * period) / 1e9);
+    }
+
+private:
+    friend class NeverDestroyed<AndroidVSyncClock>;
+
+    struct Functions {
+        AChoreographer* (*getInstance)() { nullptr };
+        void (*postFrameCallback64)(AChoreographer*, void (*)(int64_t, void*), void*) { nullptr };
+        void (*wake)(ALooper*) { nullptr };
+    };
+
+    AndroidVSyncClock()
+    {
+        void* android = dlopen("libandroid.so", RTLD_NOW);
+        if (!android)
+            return;
+        m_functions.getInstance = reinterpret_cast<decltype(m_functions.getInstance)>(dlsym(android, "AChoreographer_getInstance"));
+        m_functions.postFrameCallback64 = reinterpret_cast<decltype(m_functions.postFrameCallback64)>(dlsym(android, "AChoreographer_postFrameCallback64"));
+        m_functions.wake = reinterpret_cast<decltype(m_functions.wake)>(dlsym(android, "ALooper_wake"));
+        if (!m_functions.getInstance || !m_functions.postFrameCallback64 || !m_functions.wake)
+            return;
+
+        BinarySemaphore started;
+        Thread::create("WPE VSync"_s, [this, &started] {
+            m_looper = ALooper_prepare(0);
+            m_choreographer = m_functions.getInstance();
+            started.signal();
+            while (true) {
+                ALooper_pollOnce(-1, nullptr, nullptr, nullptr);
+                if (m_needsPost.exchange(false))
+                    postIfNeeded();
+            }
+        }, ThreadType::Graphics, Thread::QOS::UserInteractive)->detach();
+        started.wait();
+    }
+
+    static int64_t nowNanos()
+    {
+        return static_cast<int64_t>(MonotonicTime::now().secondsSinceEpoch().value() * 1e9);
+    }
+
+    void postIfNeeded()
+    {
+        if (m_callbackPending.load() || !m_choreographer)
+            return;
+        m_callbackPending.store(true);
+        m_functions.postFrameCallback64(m_choreographer, +[](int64_t frameTimeNanos, void* data) {
+            static_cast<AndroidVSyncClock*>(data)->didVSync(frameTimeNanos);
+        }, this);
+    }
+
+    void didVSync(int64_t frameTimeNanos)
+    {
+        int64_t previous = m_vsyncNanos.exchange(frameTimeNanos);
+        if (previous && frameTimeNanos > previous) {
+            // Consecutive callbacks are one period apart unless a vsync was skipped, so take
+            // the smallest recent interval, rounded against the occasional missed callback.
+            int64_t interval = frameTimeNanos - previous;
+            int64_t period = m_periodNanos.load();
+            if (!period || interval < period * 3 / 2)
+                m_periodNanos.store(period ? (period * 7 + interval) / 8 : interval);
+        }
+        m_callbackPending.store(false);
+        if (nowNanos() < m_wantedUntilNanos.load())
+            postIfNeeded();
+    }
+
+    Functions m_functions;
+    ALooper* m_looper { nullptr };
+    AChoreographer* m_choreographer { nullptr };
+    std::atomic<int64_t> m_vsyncNanos { 0 };
+    std::atomic<int64_t> m_periodNanos { 0 };
+    std::atomic<int64_t> m_wantedUntilNanos { 0 };
+    std::atomic<bool> m_callbackPending { false };
+    std::atomic<bool> m_needsPost { false };
+};
+
+// debug.wpe.scroll.vsyncsampling=0 samples scroll animations at the time they are serviced.
+static bool vsyncSamplingEnabled()
+{
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.vsyncsampling", value) > 0 && !strcmp(value, "0"));
+    }();
+    return enabled;
+}
+#endif
+
+static MonotonicTime scrollAnimationTime()
+{
+    auto now = MonotonicTime::now();
+#if OS(ANDROID)
+    if (vsyncSamplingEnabled()) {
+        if (auto vsync = AndroidVSyncClock::singleton().nextVSync(now)) {
+            WPE_TRACE_COUNTER("wpe.scroll.sample-ahead-us", (*vsync - now).microsecondsAs<int64_t>());
+            return *vsync;
+        }
+        WPE_TRACE_INSTANT("scroll: no vsync grid, sampling at the current time");
+    }
+#endif
+    return now;
+}
+
+static void keepScrollAnimationClockAlive()
+{
+#if OS(ANDROID)
+    if (vsyncSamplingEnabled())
+        AndroidVSyncClock::singleton().keepAlive();
+#endif
+}
+
+// debug.wpe.scroll.animationwaitsformain=1 restores the upstream behaviour, where a scroll
+// animation is synchronized with main thread rendering updates and only reaches the screen
+// once the main thread schedules one.
+static bool scrollAnimationsNeedMainThreadRequested()
+{
+#if OS(ANDROID)
+    static const bool requested = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.scroll.animationwaitsformain", value) > 0 && !strcmp(value, "1");
+    }();
+    return requested;
+#else
+    return true;
+#endif
+}
+
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ThreadedScrollingTree);
 
@@ -461,6 +639,17 @@ void ThreadedScrollingTree::willStartRenderingUpdate()
     if (!hasRecentActivity())
         return;
 
+    // While a scroll animation runs, the scrolling thread moves the layers on every display
+    // refresh by itself. Synchronizing with the rendering update made it wait up to half a
+    // frame for a composite that could only happen after the previous frame was presented, so
+    // the animated position regularly missed a frame and then jumped two steps.
+    if (scrollingThreadDrivesFrames()) {
+        Locker locker { m_treeLock };
+        m_state = SynchronizationState::Desynchronized;
+        WPE_TRACE_INSTANT("scroll: rendering update not synchronized, scrolling thread drives frames");
+        return;
+    }
+
     tracePoint(ScrollingThreadRenderUpdateSyncStart);
 
     // Wait for the scrolling thread to acquire m_treeLock. This ensures that any pending wheel events are processed.
@@ -567,6 +756,38 @@ void ThreadedScrollingTree::delayedRenderingUpdateDetectionTimerFired()
     m_state = SynchronizationState::Desynchronized;
 }
 
+bool ThreadedScrollingTree::hasActiveScrollAnimations()
+{
+    return scrollingThreadDrivesFrames();
+}
+
+// While the user is scrolling or a scroll animation runs, the scrolling thread moves the layers
+// on every frame by itself instead of synchronizing with main thread rendering updates, which
+// made positions wait for the main thread and regularly miss a frame. Chrome's compositor
+// thread works the same way.
+bool ThreadedScrollingTree::scrollingThreadDrivesFrames()
+{
+    if (scrollAnimationsNeedMainThreadRequested())
+        return false;
+    return !nodesWithActiveScrollAnimations().isEmpty() || hasNodesWithActiveUserScrolls();
+}
+
+void ThreadedScrollingTree::serviceScrollAnimationsForComposite()
+{
+    ASSERT(ScrollingThread::isCurrentThread());
+
+    Locker locker { m_treeLock };
+    if (!scrollingThreadDrivesFrames() || !canUpdateLayersOnScrollingThread())
+        return;
+
+    WPE_TRACE_SCOPE("scroll: animation sampled for composite");
+    auto time = scrollAnimationTime();
+    serviceScrollAnimations(time);
+    serviceResampledInput(time);
+    m_state = SynchronizationState::Desynchronized;
+    applyLayerPositionsInternal();
+}
+
 void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
 {
     TraceScope tracingScope(ScrollingThreadDisplayDidRefreshStart, ScrollingThreadDisplayDidRefreshEnd, displayID());
@@ -575,15 +796,39 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
     Locker locker { m_treeLock };
     
     auto now = MonotonicTime::now();
+    // Scroll animations are sampled at the time the tick is handled, so any jitter in its
+    // delivery becomes uneven motion.
+    WPE_TRACE_COUNTER("wpe.scroll.tick-interval-us", (now - m_lastDisplayDidRefreshTime).microsecondsAs<int64_t>());
     m_lastDisplayDidRefreshTime = now;
-    serviceScrollAnimations(now);
+    // Display refreshes arrive while the finger is still down, so the vsync grid is already
+    // known when the fling starts.
+    keepScrollAnimationClockAlive();
+    auto time = scrollAnimationTime();
+    serviceScrollAnimations(time);
+    serviceResampledInput(time);
+
+    if (scrollingThreadDrivesFrames() && canUpdateLayersOnScrollingThread()) {
+        m_state = SynchronizationState::Desynchronized;
+        applyLayerPositionsInternal();
+        return;
+    }
 
     if (m_state != SynchronizationState::Idle && canUpdateLayersOnScrollingThread())
         applyLayerPositionsInternal();
 
     switch (m_state) {
     case SynchronizationState::Idle: {
-        if (m_renderingUpdateWasScheduled) {
+        // A scroll animation (a fling) or a scroll from the scrolling thread needs a rendering
+        // update to reach the screen, but it is the main thread that schedules one, and it may
+        // be busy running script. Waiting for it would freeze the fling for as long as the main
+        // thread is busy, so give it the same short chance as a scheduled update and move the
+        // layers here if it does not start.
+        bool needsRenderingUpdate = m_renderingUpdateWasScheduled;
+        if (!needsRenderingUpdate && !scrollAnimationsNeedMainThreadRequested())
+            needsRenderingUpdate = !nodesWithActiveScrollAnimations().isEmpty() || hasPendingScrollUpdates();
+        if (needsRenderingUpdate) {
+            if (!m_renderingUpdateWasScheduled)
+                WPE_TRACE_INSTANT("scroll: animating while the main thread has not scheduled a rendering update");
             m_state = SynchronizationState::WaitingForRenderingUpdate;
             constexpr auto maxStartRenderingUpdateDelay = 1_ms;
             scheduleDelayedRenderingUpdateDetectionTimer(maxStartRenderingUpdateDelay);
