@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<body>
+<canvas id="placeholder" width="256" height="256"></canvas>
+<canvas id="target" width="256" height="256"></canvas>
+<script id="worker" type="text/worker">
+let frame = 0;
+function draw(ctx, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+onmessage = (event) => {
+    const placeholderContext = event.data.getContext("2d");
+    const bitmapContext = new OffscreenCanvas(256, 256).getContext("2d");
+    function step() {
+        draw(placeholderContext, frame % 2 ? "green" : "blue");
+        draw(bitmapContext, "green");
+        const bitmap = bitmapContext.canvas.transferToImageBitmap();
+        postMessage({ bitmap }, [bitmap]);
+        if (++frame < 10)
+            requestAnimationFrame(step);
+        else
+            postMessage({ done: true });
+    }
+    requestAnimationFrame(step);
+};
+</script>
+<script>
+if (window.testRunner) {
+    testRunner.dumpAsText();
+    testRunner.waitUntilDone();
+}
+const target = document.getElementById("target").getContext("2d");
+const offscreen = document.getElementById("placeholder").transferControlToOffscreen();
+const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById("worker").textContent])));
+worker.onmessage = (event) => {
+    if (event.data.bitmap) {
+        target.drawImage(event.data.bitmap, 0, 0);
+        event.data.bitmap.close();
+        return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.body.textContent = "PASS if no assertion or crash.";
+        window.testRunner?.notifyDone();
+    }));
+};
+worker.postMessage(offscreen, [offscreen]);
+</script>

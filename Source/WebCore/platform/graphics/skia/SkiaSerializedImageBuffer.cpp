@@ -57,9 +57,25 @@ SkiaSerializedImageBuffer::SkiaSerializedImageBuffer(ImageBuffer& imageBuffer)
     m_colorSpace = imageBuffer.colorSpace();
     m_bufferFormat = { imageBuffer.pixelFormat() };
     m_fence = GLFence::create(PlatformDisplay::sharedDisplay().glDisplay());
+    m_imageRunLoop = RunLoop::currentSingleton();
 }
 
-SkiaSerializedImageBuffer::~SkiaSerializedImageBuffer() = default;
+SkiaSerializedImageBuffer::~SkiaSerializedImageBuffer()
+{
+    if (!m_image)
+        return;
+
+    RefPtr runLoop = m_imageRunLoop.get();
+    if (!runLoop || runLoop.get() == &RunLoop::currentSingleton())
+        return;
+
+    runLoop->dispatch([image = WTF::move(m_image), fence = WTF::move(m_imageReadFence)]() mutable {
+        auto* glContext = PlatformDisplay::sharedDisplay().skiaGLContext();
+        if (fence && glContext && glContext->makeContextCurrent())
+            fence->serverWait();
+        image = nullptr;
+    });
+}
 
 RefPtr<ImageBuffer> SkiaSerializedImageBuffer::sinkIntoImageBuffer()
 {
@@ -86,6 +102,7 @@ RefPtr<ImageBuffer> SkiaSerializedImageBuffer::sinkIntoImageBuffer()
     copiedImageBuffer->context().drawNativeImage(*m_image, destination, source, { CompositeOperator::Copy });
     // Flush the context to ensure all operations are done before the source image buffer is destroyed.
     copiedImageBuffer->flushDrawingContext();
+    m_imageReadFence = GLFence::create(PlatformDisplay::sharedDisplay().glDisplay());
     return copiedImageBuffer;
 }
 

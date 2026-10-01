@@ -69,6 +69,9 @@ NativeImage::NativeImage(PlatformImagePtr&& platformImage, std::optional<GainMap
 
 NativeImage::~NativeImage()
 {
+#if USE(SKIA)
+    ASSERT(!m_platformImage || !m_platformImage->isTextureBacked() || !m_platformImage->unique() || m_creationThread.ptr() == &Thread::currentSingleton());
+#endif
     for (CheckedRef observer : m_observers)
         observer->willDestroyNativeImage(*this);
 }

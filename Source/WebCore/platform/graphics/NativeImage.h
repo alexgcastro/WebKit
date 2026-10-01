@@ -36,6 +36,7 @@
 #include <wtf/CheckedRef.h>
 #include <wtf/Lock.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/Threading.h>
 #include <wtf/Vector.h>
 
 #if USE(SKIA)
@@ -144,6 +145,9 @@ protected:
     RenderingResourceIdentifier m_renderingResourceIdentifier { RenderingResourceIdentifier::generate() };
 #if USE(SKIA)
     GrDirectContext* m_grContext { nullptr };
+#if ASSERT_ENABLED
+    const Ref<Thread> m_creationThread { Thread::currentSingleton() };
+#endif
 #endif
 };
 
