@@ -94,6 +94,8 @@ LocalPlaceholderRenderingContextSource::LocalPlaceholderRenderingContextSource(P
 {
 }
 
+LocalPlaceholderRenderingContextSource::~LocalPlaceholderRenderingContextSource() = default;
+
 void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& imageBuffer, bool originClean, bool opaque)
 {
     auto frame = m_lastFrame.increment();
@@ -105,19 +107,39 @@ void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& i
     std::unique_ptr serializedClone = ImageBuffer::sinkIntoSerializedImageBuffer(WTF::move(clone));
     if (!serializedClone)
         return;
-    callOnMainThread([weakPlaceholder = m_placeholder, buffer = WTF::move(serializedClone), frame, originClean, opaque] () mutable {
-        assertIsMainThread();
-        RefPtr placeholder = weakPlaceholder.get();
-        if (!placeholder)
-            return;
-        RefPtr imageBuffer = SerializedImageBuffer::sinkIntoImageBuffer(WTF::move(buffer), protect(protect(placeholder->canvas())->scriptExecutionContext())->graphicsClient());
-        if (!imageBuffer)
-            return;
-        // Compares the frames, so that a possibly already historical buffer in this main thread
-        // task does not override the newest buffer that the worker thread already set.
-        protect(placeholder->layerContents())->copyFrame(*imageBuffer, opaque, frame);
-        placeholder->setPlaceholderBuffer(imageBuffer.releaseNonNull(), frame, originClean, opaque);
+
+    std::optional<PendingFrame> replacedFrame;
+    {
+        Locker locker { m_pendingFrameLock };
+        replacedFrame = std::exchange(m_pendingFrame, PendingFrame { WTF::move(serializedClone), frame, originClean, opaque });
+    }
+    if (replacedFrame)
+        return;
+    callOnMainThread([protectedThis = Ref { *this }] {
+        protectedThis->commitPendingFrame();
     });
+}
+
+void LocalPlaceholderRenderingContextSource::commitPendingFrame()
+{
+    assertIsMainThread();
+    std::optional<PendingFrame> pendingFrame;
+    {
+        Locker locker { m_pendingFrameLock };
+        pendingFrame = std::exchange(m_pendingFrame, std::nullopt);
+    }
+    if (!pendingFrame)
+        return;
+    RefPtr placeholder = m_placeholder.get();
+    if (!placeholder)
+        return;
+    RefPtr imageBuffer = SerializedImageBuffer::sinkIntoImageBuffer(WTF::move(pendingFrame->buffer), protect(protect(placeholder->canvas())->scriptExecutionContext())->graphicsClient());
+    if (!imageBuffer)
+        return;
+    // Compares the frames, so that a possibly already historical buffer in this main thread
+    // task does not override the newest buffer that the worker thread already set.
+    protect(placeholder->layerContents())->copyFrame(*imageBuffer, pendingFrame->opaque, pendingFrame->frame);
+    placeholder->setPlaceholderBuffer(imageBuffer.releaseNonNull(), pendingFrame->frame, pendingFrame->originClean, pendingFrame->opaque);
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(PlaceholderRenderingContext);

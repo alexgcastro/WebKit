@@ -8903,6 +8903,11 @@ void Internals::getImageBufferResourceLimits(ImageBufferResourceLimitsPromise&& 
     });
 }
 
+unsigned Internals::serializedImageBufferCount() const
+{
+    return SerializedImageBuffer::liveCountForTesting();
+}
+
 void Internals::setResourceCachingDisabledByWebInspector(bool disabled)
 {
     RefPtr document = contextDocument();

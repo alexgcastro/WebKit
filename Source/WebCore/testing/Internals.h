@@ -1709,6 +1709,7 @@ public:
     using ImageBufferResourceLimits = WebCore::ImageBufferResourceLimits;
     using ImageBufferResourceLimitsPromise = DOMPromiseDeferred<IDLDictionary<ImageBufferResourceLimits>>;
     void getImageBufferResourceLimits(ImageBufferResourceLimitsPromise&&);
+    unsigned serializedImageBufferCount() const;
 
     void setResourceCachingDisabledByWebInspector(bool);
     ExceptionOr<void> lowerAllFrameMemoryMonitorLimits();

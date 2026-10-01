@@ -153,6 +153,23 @@ bool ImageBuffer::sizeNeedsClamping(const FloatSize& size)
     return floorf(size.height()) * floorf(size.width()) > MaxClampedArea;
 }
 
+static std::atomic<unsigned> s_liveSerializedImageBufferCount;
+
+SerializedImageBuffer::SerializedImageBuffer()
+{
+    ++s_liveSerializedImageBufferCount;
+}
+
+SerializedImageBuffer::~SerializedImageBuffer()
+{
+    --s_liveSerializedImageBufferCount;
+}
+
+unsigned SerializedImageBuffer::liveCountForTesting()
+{
+    return s_liveSerializedImageBufferCount;
+}
+
 RefPtr<ImageBuffer> SerializedImageBuffer::sinkIntoImageBuffer(std::unique_ptr<SerializedImageBuffer> buffer, GraphicsClient* graphicsClient)
 {
     if (graphicsClient)

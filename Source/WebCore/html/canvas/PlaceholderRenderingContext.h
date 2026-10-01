@@ -39,6 +39,7 @@ namespace WebCore {
 
 class GraphicsLayerAsyncContentsDisplayDelegate;
 class PlaceholderRenderingContext;
+class SerializedImageBuffer;
 
 // What a placeholder's compositor layer shows. Shared with a source in the same process, so that it
 // can update the layer straight from the OffscreenCanvas's thread.
@@ -71,15 +72,26 @@ class LocalPlaceholderRenderingContextSource final : public PlaceholderRendering
     WTF_MAKE_TZONE_ALLOCATED(LocalPlaceholderRenderingContextSource);
 public:
     static Ref<LocalPlaceholderRenderingContextSource> create(PlaceholderRenderingContext&);
+    ~LocalPlaceholderRenderingContextSource();
 
     void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque) final;
 
 private:
     explicit LocalPlaceholderRenderingContextSource(PlaceholderRenderingContext&);
 
+    struct PendingFrame {
+        std::unique_ptr<SerializedImageBuffer> buffer;
+        PlaceholderFrameIdentifier frame;
+        bool originClean { false };
+        bool opaque { false };
+    };
+    void commitPendingFrame();
+
     WeakPtr<PlaceholderRenderingContext> m_placeholder; // For main thread use.
     const Ref<PlaceholderLayerContents> m_layerContents;
     PlaceholderFrameIdentifier m_lastFrame; // For OffscreenCanvas holder thread use (main or worker).
+    Lock m_pendingFrameLock;
+    std::optional<PendingFrame> m_pendingFrame WTF_GUARDED_BY_LOCK(m_pendingFrameLock);
 };
 
 class PlaceholderRenderingContext final : public CanvasRenderingContext {

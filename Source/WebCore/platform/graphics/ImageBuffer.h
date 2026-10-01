@@ -260,8 +260,10 @@ class SerializedImageBuffer {
     WTF_MAKE_NONCOPYABLE(SerializedImageBuffer);
 public:
 
-    SerializedImageBuffer() = default;
-    virtual ~SerializedImageBuffer() = default;
+    WEBCORE_EXPORT SerializedImageBuffer();
+    WEBCORE_EXPORT virtual ~SerializedImageBuffer();
+
+    WEBCORE_EXPORT static unsigned liveCountForTesting();
 
     virtual size_t memoryCost() const = 0;
     virtual std::unique_ptr<SerializedImageBuffer> clone() const { return nullptr; }

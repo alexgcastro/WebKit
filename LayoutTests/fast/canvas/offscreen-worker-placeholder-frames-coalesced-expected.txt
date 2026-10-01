@@ -1,0 +1,3 @@
+ PASS: the worker committed frames while the main thread was busy.
+PASS: frames waiting for the main thread were coalesced.
+

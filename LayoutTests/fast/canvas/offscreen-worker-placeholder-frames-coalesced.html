@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<body>
+<canvas id="canvas" width="256" height="256"></canvas>
+<pre id="log"></pre>
+<script id="worker" type="text/worker">
+let context, frame = 0, blockStartFrame = 0;
+function draw() {
+    context.fillStyle = frame++ % 2 ? "green" : "blue";
+    context.fillRect(0, 0, context.canvas.width, context.canvas.height);
+    requestAnimationFrame(draw);
+}
+onmessage = (event) => {
+    if (event.data === "blockStart") {
+        blockStartFrame = frame;
+        return;
+    }
+    if (event.data === "blockEnd") {
+        postMessage({ framesDuringBlock: frame - blockStartFrame });
+        return;
+    }
+    context = event.data.getContext("2d");
+    requestAnimationFrame(draw);
+    requestAnimationFrame(() => requestAnimationFrame(() => postMessage({ started: true })));
+};
+</script>
+<script>
+if (window.testRunner) {
+    testRunner.dumpAsText();
+    testRunner.waitUntilDone();
+}
+
+function log(message) {
+    document.getElementById("log").textContent += message + "\n";
+}
+
+const maximumPendingBuffers = 3;
+let pendingBuffers = 0;
+const offscreen = document.getElementById("canvas").transferControlToOffscreen();
+const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById("worker").textContent])));
+worker.onmessage = (event) => {
+    if (event.data.started) {
+        worker.postMessage("blockStart");
+        // Keep the main thread busy while the worker commits frames to the placeholder.
+        const start = performance.now();
+        while (performance.now() - start < 3000) {
+            pendingBuffers = internals.serializedImageBufferCount();
+            if (pendingBuffers > 10)
+                break;
+        }
+        worker.postMessage("blockEnd");
+        return;
+    }
+    log(event.data.framesDuringBlock > maximumPendingBuffers ? "PASS: the worker committed frames while the main thread was busy." : "FAIL: the worker committed only " + event.data.framesDuringBlock + " frames while the main thread was busy.");
+    log(pendingBuffers <= maximumPendingBuffers ? "PASS: frames waiting for the main thread were coalesced." : "FAIL: " + pendingBuffers + " frames were waiting for the main thread.");
+    window.testRunner?.notifyDone();
+};
+worker.postMessage(offscreen, [offscreen]);
+</script>
