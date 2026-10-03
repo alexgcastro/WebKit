@@ -27,10 +27,14 @@
 #include "GraphicsLayerAsyncContentsDisplayDelegateCoordinated.h"
 
 #if USE(COORDINATED_GRAPHICS)
+#include "CoordinatedPlatformLayer.h"
+#include "CoordinatedPlatformLayerBufferProxy.h"
 #include "GraphicsLayer.h"
 #include "GraphicsLayerContentsDisplayDelegateCoordinated.h"
+#include "GraphicsLayerCoordinated.h"
 #include "ImageBuffer.h"
 #include "NativeImage.h"
+#include <wtf/MainThread.h>
 
 #if USE(TEXTURE_MAPPER)
 #include "CoordinatedPlatformLayerBufferNativeImage.h"
@@ -44,28 +48,108 @@ GraphicsLayerAsyncContentsDisplayDelegateCoordinated::GraphicsLayerAsyncContents
     : m_delegate(GraphicsLayerContentsDisplayDelegateCoordinated::create())
 {
     layer.setContentsDisplayDelegate(m_delegate.ptr(), GraphicsLayer::ContentsLayerPurpose::Canvas);
+    bindBufferProxy(layer);
 }
 
-GraphicsLayerAsyncContentsDisplayDelegateCoordinated::~GraphicsLayerAsyncContentsDisplayDelegateCoordinated() = default;
+GraphicsLayerAsyncContentsDisplayDelegateCoordinated::~GraphicsLayerAsyncContentsDisplayDelegateCoordinated()
+{
+    RefPtr bufferProxy = WTF::move(m_bufferProxy);
+    if (!bufferProxy)
+        return;
+#if !USE(TEXTURE_MAPPER)
+    bufferProxy->releaseImageOnCompositingThread(takeLastImage());
+#endif
+    ensureOnMainThread([bufferProxy = WTF::move(bufferProxy)] {
+        bufferProxy->invalidate();
+    });
+}
+
+void GraphicsLayerAsyncContentsDisplayDelegateCoordinated::bindBufferProxy(GraphicsLayer& layer)
+{
+    assertIsMainThread();
+    auto* coordinatedLayer = dynamicDowncast<GraphicsLayerCoordinated>(layer);
+    RefPtr platformLayer = coordinatedLayer ? &coordinatedLayer->coordinatedPlatformLayer() : nullptr;
+    if (m_boundLayer == platformLayer)
+        return;
+    if (RefPtr bufferProxy = std::exchange(m_bufferProxy, nullptr))
+        bufferProxy->invalidate();
+    m_boundLayer = platformLayer;
+    if (!platformLayer)
+        return;
+    m_bufferProxy = CoordinatedPlatformLayerBufferProxy::create(platformLayer.releaseNonNull());
+#if !USE(TEXTURE_MAPPER)
+    if (auto lastImage = this->lastImage()) {
+        auto alphaMode = lastImage->isOpaque() ? CoordinatedPlatformLayerBufferSkiaImage::AlphaMode::Opaque : CoordinatedPlatformLayerBufferSkiaImage::AlphaMode::Premultiplied;
+        Ref { *m_bufferProxy }->setDisplayBuffer(makeUnique<CoordinatedPlatformLayerBufferSkiaImage>(WTF::move(lastImage), alphaMode, CoordinatedPlatformLayerBufferSkiaImage::Rotation::None));
+    }
+#endif
+}
 
 bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryCopyToLayer(ImageBuffer& imageBuffer, bool, PlaceholderFrameIdentifier)
 {
-    auto image = ImageBuffer::sinkIntoNativeImage(imageBuffer.clone());
-    if (!image)
+    RefPtr bufferProxy = m_bufferProxy;
+    if (!bufferProxy)
         return false;
 
 #if USE(TEXTURE_MAPPER)
-    m_delegate->setDisplayBuffer(CoordinatedPlatformLayerBufferNativeImage::create(image.releaseNonNull(), nullptr));
+    auto image = ImageBuffer::sinkIntoNativeImage(imageBuffer.clone());
+    if (!image)
+        return false;
+    bufferProxy->setDisplayBuffer(CoordinatedPlatformLayerBufferNativeImage::create(image.releaseNonNull(), nullptr));
 #else
-    m_delegate->setDisplayBuffer(CoordinatedPlatformLayerBufferSkiaImage::create(image->platformImage(), m_threadSafeGrContext));
+    auto threadSafeGrContext = bufferProxy->threadSafeGrContext();
+    if (!threadSafeGrContext)
+        return false;
+
+    auto buffer = imageBuffer.createCompositorDisplayBuffer(threadSafeGrContext);
+    if (!buffer) {
+        RefPtr image = imageBuffer.createNativeImageReference();
+        if (!image)
+            return false;
+        buffer = CoordinatedPlatformLayerBufferSkiaImage::create(image->platformImage(), threadSafeGrContext);
+    }
+    sk_sp<SkImage> previousImage;
+    {
+        Locker locker { m_lastImageLock };
+        previousImage = std::exchange(m_lastImage, buffer->skiaImage());
+    }
+    bufferProxy->releaseImageOnCompositingThread(WTF::move(previousImage));
+    bufferProxy->setDisplayBuffer(WTF::move(buffer));
 #endif
 
     return true;
 }
 
+#if !USE(TEXTURE_MAPPER)
+RefPtr<NativeImage> GraphicsLayerAsyncContentsDisplayDelegateCoordinated::copyCurrentBuffer()
+{
+    assertIsMainThread();
+    RefPtr bufferProxy = m_bufferProxy;
+    if (!bufferProxy)
+        return nullptr;
+    auto image = lastImage();
+    RefPtr copy = bufferProxy->copyImage(image);
+    bufferProxy->releaseImageOnCompositingThread(WTF::move(image));
+    return copy;
+}
+
+sk_sp<SkImage> GraphicsLayerAsyncContentsDisplayDelegateCoordinated::lastImage()
+{
+    Locker locker { m_lastImageLock };
+    return m_lastImage;
+}
+
+sk_sp<SkImage> GraphicsLayerAsyncContentsDisplayDelegateCoordinated::takeLastImage()
+{
+    Locker locker { m_lastImageLock };
+    return std::exchange(m_lastImage, nullptr);
+}
+#endif
+
 void GraphicsLayerAsyncContentsDisplayDelegateCoordinated::updateGraphicsLayer(GraphicsLayer& layer)
 {
     layer.setContentsDisplayDelegate(m_delegate.ptr(), GraphicsLayer::ContentsLayerPurpose::Canvas);
+    bindBufferProxy(layer);
 }
 
 } // namespace WebCore

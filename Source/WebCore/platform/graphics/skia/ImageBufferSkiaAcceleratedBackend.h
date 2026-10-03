@@ -39,6 +39,7 @@ class GrDirectContext;
 
 namespace WebCore {
 
+class CompositorBufferPool;
 class GraphicsContextSkia;
 class SkiaSwitchableCanvas;
 
@@ -71,6 +72,11 @@ private:
 
 #if USE(COORDINATED_GRAPHICS)
     RefPtr<GraphicsLayerContentsDisplayDelegate> layerContentsDisplayDelegate() const final;
+#if !USE(TEXTURE_MAPPER)
+    std::unique_ptr<CoordinatedPlatformLayerBuffer> createCompositorDisplayBuffer(const sk_sp<GrContextThreadSafeProxy>&) final;
+
+    RefPtr<CompositorBufferPool> m_compositorBufferPool;
+#endif
 
     const RefPtr<GraphicsLayerContentsDisplayDelegate> m_layerContentsDisplayDelegate;
 #endif

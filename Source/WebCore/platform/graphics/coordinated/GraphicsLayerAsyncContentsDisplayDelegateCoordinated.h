@@ -27,10 +27,19 @@
 
 #if USE(COORDINATED_GRAPHICS)
 #include "GraphicsLayerContentsDisplayDelegate.h"
+#include <wtf/Lock.h>
 #include <wtf/Ref.h>
+
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkImage.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#endif
 
 namespace WebCore {
 
+class CoordinatedPlatformLayer;
+class CoordinatedPlatformLayerBufferProxy;
 class GraphicsLayer;
 
 class GraphicsLayerAsyncContentsDisplayDelegateCoordinated final : public GraphicsLayerAsyncContentsDisplayDelegate {
@@ -50,8 +59,22 @@ private:
     void display(CoordinatedPlatformLayer&, std::optional<Damage>&&) override { RELEASE_ASSERT_NOT_REACHED(); }
 
     bool tryCopyToLayer(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier) override;
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+    bool canCopyCurrentBuffer() const override { return true; }
+    RefPtr<NativeImage> copyCurrentBuffer() override;
+    sk_sp<SkImage> lastImage();
+    sk_sp<SkImage> takeLastImage();
+#endif
+
+    void bindBufferProxy(GraphicsLayer&);
 
     const Ref<GraphicsLayerContentsDisplayDelegate> m_delegate;
+    RefPtr<CoordinatedPlatformLayerBufferProxy> m_bufferProxy;
+    RefPtr<CoordinatedPlatformLayer> m_boundLayer;
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+    Lock m_lastImageLock;
+    sk_sp<SkImage> m_lastImage WTF_GUARDED_BY_LOCK(m_lastImageLock);
+#endif
 };
 
 } // namespace WebCore

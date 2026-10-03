@@ -31,6 +31,7 @@
 #include "PlaceholderFrameIdentifier.h"
 #include "PlaceholderRenderingContextSource.h"
 #include "PlatformLayerIdentifier.h"
+#include <atomic>
 #include <wtf/Markable.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/WeakPtr.h>
@@ -38,6 +39,7 @@
 namespace WebCore {
 
 class GraphicsLayerAsyncContentsDisplayDelegate;
+class NativeImage;
 class PlaceholderRenderingContext;
 class SerializedImageBuffer;
 
@@ -48,8 +50,21 @@ class PlaceholderLayerContents final : public ThreadSafeRefCounted<PlaceholderLa
 public:
     static Ref<PlaceholderLayerContents> create() { return adoptRef(*new PlaceholderLayerContents); }
 
+    struct FrameMetadata {
+        IntSize size;
+        bool originClean { false };
+        bool opaque { false };
+        bool operator==(const FrameMetadata&) const = default;
+    };
+
+    struct Frame {
+        PlaceholderFrameIdentifier identifier;
+        std::optional<FrameMetadata> metadata;
+        RefPtr<NativeImage> image;
+    };
+
     // Shows the frame unless a newer one is already shown. On any thread.
-    void copyFrame(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier);
+    bool copyFrame(ImageBuffer&, bool originClean, bool opaque, PlaceholderFrameIdentifier);
     // Like copyFrame(), for a buffer that nothing will draw into again. It reaches the compositor
     // with the next rendering update. On the main thread.
     void setFrameForNextDisplay(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier);
@@ -57,12 +72,21 @@ public:
     // On the main thread.
     std::optional<PlatformLayerIdentifier> attach(GraphicsLayer&, ImageBuffer*, bool opaque, PlaceholderFrameIdentifier);
 
+    PlaceholderFrameIdentifier currentFrame();
+    std::optional<Frame> currentFrameMetadataIfNewerThan(PlaceholderFrameIdentifier);
+    std::optional<Frame> copyCurrentFrameIfNewerThan(PlaceholderFrameIdentifier);
+
+    bool canCopyCurrentFrame();
+    void setNeedsFramesOnMainThread(bool value) { m_needsFramesOnMainThread.store(value, std::memory_order_relaxed); }
+
 private:
     PlaceholderLayerContents() = default;
 
     Lock m_lock;
     RefPtr<GraphicsLayerAsyncContentsDisplayDelegate> m_delegate WTF_GUARDED_BY_LOCK(m_lock);
     PlaceholderFrameIdentifier m_frame WTF_GUARDED_BY_LOCK(m_lock);
+    std::optional<FrameMetadata> m_frameMetadata WTF_GUARDED_BY_LOCK(m_lock);
+    std::atomic<bool> m_needsFramesOnMainThread { false };
 };
 
 // The source for an OffscreenCanvas in the same process as its placeholder, on any thread. Only the
@@ -75,9 +99,12 @@ public:
     ~LocalPlaceholderRenderingContextSource();
 
     void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque) final;
+    void offscreenCanvasWillBeDestroyed() final;
 
 private:
     explicit LocalPlaceholderRenderingContextSource(PlaceholderRenderingContext&);
+
+    using FrameMetadata = PlaceholderLayerContents::FrameMetadata;
 
     struct PendingFrame {
         std::unique_ptr<SerializedImageBuffer> buffer;
@@ -90,6 +117,7 @@ private:
     WeakPtr<PlaceholderRenderingContext> m_placeholder; // For main thread use.
     const Ref<PlaceholderLayerContents> m_layerContents;
     PlaceholderFrameIdentifier m_lastFrame; // For OffscreenCanvas holder thread use (main or worker).
+    std::optional<FrameMetadata> m_lastMetadata; // For OffscreenCanvas holder thread use (main or worker).
     Lock m_pendingFrameLock;
     std::optional<PendingFrame> m_pendingFrame WTF_GUARDED_BY_LOCK(m_pendingFrameLock);
 };
@@ -105,6 +133,7 @@ public:
     HTMLCanvasElement& NODELETE canvas() const;
     IntSize NODELETE size() const;
     void setPlaceholderBuffer(Ref<ImageBuffer>&&, PlaceholderFrameIdentifier, bool originClean, bool opaque);
+    void updateFrameMetadata();
     // A frame from a source in another process, whose buffer nothing will draw into again.
     void setPlaceholderBufferFromAnotherProcess(Ref<ImageBuffer>&&, PlaceholderFrameIdentifier, bool originClean, bool opaque);
 
@@ -115,16 +144,21 @@ public:
     RefPtr<NativeImage> surfaceBufferToNativeImage(SurfaceBuffer) final;
     bool isSurfaceBufferTransparentBlack(SurfaceBuffer) const final;
     void didUpdateCanvasSizeProperties(bool) final;
+    void didChangeCanvasObservers() final;
 
 private:
     PlaceholderRenderingContext(HTMLCanvasElement&);
     void setContentsToLayer(GraphicsLayer&) final;
     PixelFormat pixelFormat() const final;
+    void applyFrameMetadata(const PlaceholderLayerContents::FrameMetadata&);
+    void updateFromCurrentFrameIfNeeded();
+    RefPtr<ImageBuffer> ensureBufferFromNativeImage();
     bool isOpaque() const final { return m_opaque; }
 
     const PlaceholderRenderingContextIdentifier m_identifier;
     const Ref<PlaceholderLayerContents> m_layerContents;
     PlaceholderFrameIdentifier m_frame;
+    PlaceholderFrameIdentifier m_metadataFrame;
     Markable<PlatformLayerIdentifier> m_reportedLayerID;
     RefPtr<ImageBuffer> m_buffer; // Temporary until content is provided as NativeImage.
     RefPtr<NativeImage> m_bufferNativeImage;

@@ -458,11 +458,7 @@ RefPtr<GraphicsLayerAsyncContentsDisplayDelegate> GraphicsLayerCoordinated::crea
         static_cast<GraphicsLayerAsyncContentsDisplayDelegateCoordinated*>(existing)->updateGraphicsLayer(*this);
         return existing;
     }
-    auto delegate = GraphicsLayerAsyncContentsDisplayDelegateCoordinated::create(*this);
-#if !USE(TEXTURE_MAPPER)
-    delegate->setThreadSafeGrContext(m_platformLayer->threadSafeGrContext());
-#endif
-    return delegate;
+    return GraphicsLayerAsyncContentsDisplayDelegateCoordinated::create(*this);
 }
 
 void GraphicsLayerCoordinated::setContentsToNativeImage(NativeImage* image)

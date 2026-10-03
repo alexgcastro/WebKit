@@ -302,6 +302,7 @@ add_library(Skia STATIC
     src/gpu/ganesh/GrBufferAllocPool.cpp
     src/gpu/ganesh/GrBufferTransferRenderTask.cpp
     src/gpu/ganesh/GrBufferUpdateRenderTask.cpp
+    src/gpu/ganesh/GrCanvas.cpp
     src/gpu/ganesh/GrCaps.cpp
     src/gpu/ganesh/GrClientMappedBufferManager.cpp
     src/gpu/ganesh/GrColorInfo.cpp

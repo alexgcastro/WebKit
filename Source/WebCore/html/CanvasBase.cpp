@@ -139,6 +139,8 @@ void CanvasBase::setMaxCanvasAreaForTesting(std::optional<size_t> size)
 void CanvasBase::addObserver(CanvasObserver& observer)
 {
     m_observers.add(observer);
+    if (RefPtr context = renderingContext())
+        context->didChangeCanvasObservers();
 
     if (is<Style::CanvasImage>(observer))
         InspectorInstrumentation::didChangeCSSCanvasClientNodes(*this);
@@ -147,6 +149,8 @@ void CanvasBase::addObserver(CanvasObserver& observer)
 void CanvasBase::removeObserver(CanvasObserver& observer)
 {
     m_observers.remove(observer);
+    if (RefPtr context = renderingContext())
+        context->didChangeCanvasObservers();
 
     if (is<Style::CanvasImage>(observer))
         InspectorInstrumentation::didChangeCSSCanvasClientNodes(*this);

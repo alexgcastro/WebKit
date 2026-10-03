@@ -178,6 +178,8 @@ OffscreenCanvas::OffscreenCanvas(ScriptExecutionContext& scriptExecutionContext,
 
 OffscreenCanvas::~OffscreenCanvas()
 {
+    if (RefPtr placeholderSource = m_placeholderSource)
+        placeholderSource->offscreenCanvasWillBeDestroyed();
     notifyObserversCanvasDestroyed();
     removeCanvasNeedingPreparationForDisplayOrFlush();
 }

@@ -51,6 +51,7 @@ public:
 
     // Called by the offscreen context to submit the frame.
     virtual void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque) = 0;
+    virtual void offscreenCanvasWillBeDestroyed() { }
 
     // Where a source in another process delivers its frames: straight to the placeholder, on the main
     // thread of the process that owns it. Returns false, leaving the frame's buffer unclaimed, if the

@@ -52,6 +52,17 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include "CoordinatedPlatformLayerBufferNativeImage.h"
 #else
 #include "CoordinatedPlatformLayerBufferSkiaImage.h"
+#include <epoxy/gl.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/android/SkCanvasAndroid.h>
+#include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
+#include <skia/gpu/ganesh/gl/GrGLTypes.h>
+#include <skia/private/chromium/GrPromiseImageTexture.h>
+#include <skia/private/chromium/SkImageChromium.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#include <wtf/Condition.h>
+#include <wtf/Lock.h>
+#include <wtf/ThreadSafeRefCounted.h>
 #endif
 #include "GraphicsLayerContentsDisplayDelegateCoordinated.h"
 #endif
@@ -76,6 +87,128 @@ public:
             SkNWayCanvas::addCanvas(canvas);
     }
 };
+
+#if USE(COORDINATED_GRAPHICS) && !USE(TEXTURE_MAPPER)
+class CompositorBufferPool final : public ThreadSafeRefCounted<CompositorBufferPool> {
+    WTF_MAKE_TZONE_ALLOCATED_INLINE(CompositorBufferPool);
+public:
+    static constexpr unsigned maximumBufferCount = 4;
+
+    static Ref<CompositorBufferPool> create(const IntSize& size)
+    {
+        return adoptRef(*new CompositorBufferPool(size));
+    }
+
+    ~CompositorBufferPool()
+    {
+        auto* glContext = PlatformDisplay::sharedDisplay().skiaGLContext();
+        if (!glContext || !glContext->makeContextCurrent())
+            return;
+        for (auto& buffer : m_buffers) {
+            if (buffer.texture)
+                glDeleteTextures(1, &buffer.texture);
+        }
+    }
+
+    const IntSize& size() const { return m_size; }
+
+    struct Lease {
+        unsigned index { 0 };
+        unsigned texture { 0 };
+        std::unique_ptr<GLFence> releaseFence;
+    };
+
+    std::optional<Lease> acquire()
+    {
+        Locker locker { m_lock };
+        while (true) {
+            for (unsigned i = 0; i < m_buffers.size(); ++i) {
+                auto& buffer = m_buffers[i];
+                if (buffer.inUse)
+                    continue;
+                buffer.inUse = true;
+                return Lease { i, buffer.texture, WTF::move(buffer.releaseFence) };
+            }
+            if (m_buffers.size() < maximumBufferCount) {
+                unsigned texture = 0;
+                glGenTextures(1, &texture);
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_size.width(), m_size.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                m_buffers.append({ texture, true, nullptr });
+                return Lease { static_cast<unsigned>(m_buffers.size() - 1), texture, nullptr };
+            }
+            if (!m_condition.waitFor(m_lock, 100_ms))
+                return std::nullopt;
+        }
+    }
+
+    void release(unsigned index, std::unique_ptr<GLFence>&& releaseFence)
+    {
+        Locker locker { m_lock };
+        auto& buffer = m_buffers[index];
+        buffer.inUse = false;
+        buffer.releaseFence = WTF::move(releaseFence);
+        m_condition.notifyAll();
+    }
+
+private:
+    explicit CompositorBufferPool(const IntSize& size)
+        : m_size(size)
+    {
+    }
+
+    struct Buffer {
+        unsigned texture { 0 };
+        bool inUse { false };
+        std::unique_ptr<GLFence> releaseFence;
+    };
+
+    const IntSize m_size;
+    Lock m_lock;
+    Condition m_condition;
+    Vector<Buffer, maximumBufferCount> m_buffers WTF_GUARDED_BY_LOCK(m_lock);
+};
+
+struct CompositorBufferPromiseContext {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(CompositorBufferPromiseContext);
+
+    Ref<CompositorBufferPool> pool;
+    CompositorBufferPool::Lease lease;
+    std::unique_ptr<GLFence> readyFence;
+
+    sk_sp<GrPromiseImageTexture> fulfill()
+    {
+        auto* glContext = PlatformDisplay::sharedDisplay().skiaGLContext();
+        if (!glContext || !glContext->makeContextCurrent())
+            return nullptr;
+        if (readyFence) {
+            readyFence->serverWait();
+            readyFence = nullptr;
+        }
+        GrGLTextureInfo textureInfo;
+        textureInfo.fTarget = GL_TEXTURE_2D;
+        textureInfo.fID = lease.texture;
+        textureInfo.fFormat = GL_RGBA8;
+        const auto& size = pool->size();
+        return GrPromiseImageTexture::Make(GrBackendTextures::MakeGL(size.width(), size.height(), skgpu::Mipmapped::kNo, textureInfo));
+    }
+
+    void release()
+    {
+        std::unique_ptr<GLFence> releaseFence;
+        auto* glContext = PlatformDisplay::sharedDisplay().skiaGLContext();
+        if (glContext && glContext->makeContextCurrent())
+            releaseFence = GLFence::create(PlatformDisplay::sharedDisplay().glDisplay());
+        pool->release(lease.index, WTF::move(releaseFence));
+    }
+};
+
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(CompositorBufferPromiseContext);
+#endif
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ImageBufferSkiaAcceleratedBackend);
 
@@ -345,6 +478,77 @@ RefPtr<GraphicsLayerContentsDisplayDelegate> ImageBufferSkiaAcceleratedBackend::
 {
     return m_layerContentsDisplayDelegate;
 }
+
+#if !USE(TEXTURE_MAPPER)
+std::unique_ptr<CoordinatedPlatformLayerBuffer> ImageBufferSkiaAcceleratedBackend::createCompositorDisplayBuffer(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext)
+{
+    if (!threadSafeGrContext)
+        return nullptr;
+
+    auto& display = PlatformDisplay::sharedDisplay();
+    auto* glContext = display.skiaGLContext();
+    if (!glContext || !glContext->makeContextCurrent())
+        return nullptr;
+
+    auto* grContext = this->grContext();
+    if (!grContext || grContext != display.skiaGrContext())
+        return nullptr;
+
+    replayCanvasRecordingContextIfNeeded();
+
+    grContext->flush(GrFlushInfo { });
+
+    auto renderTarget = skgpu::ganesh::TopLayerBackendRenderTarget(m_surface->getCanvas());
+    GrGLFramebufferInfo framebufferInfo;
+    if (!renderTarget.isValid() || renderTarget.sampleCnt() <= 1 || !GrBackendRenderTargets::GetGLFramebufferInfo(renderTarget, &framebufferInfo) || framebufferInfo.fFormat != GL_RGBA8)
+        return nullptr;
+
+    IntSize size(m_surface->width(), m_surface->height());
+    if (!m_compositorBufferPool || m_compositorBufferPool->size() != size)
+        m_compositorBufferPool = CompositorBufferPool::create(size);
+    Ref pool = *m_compositorBufferPool;
+
+    auto lease = pool->acquire();
+    if (!lease) {
+        grContext->resetContext(kRenderTarget_GrGLBackendState | kTextureBinding_GrGLBackendState | kView_GrGLBackendState);
+        return nullptr;
+    }
+    if (lease->releaseFence) {
+        lease->releaseFence->serverWait();
+        lease->releaseFence = nullptr;
+    }
+
+    GLuint drawFramebuffer = 0;
+    glGenFramebuffers(1, &drawFramebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFramebuffer);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lease->texture, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebufferInfo.fFBOID);
+    glDisable(GL_SCISSOR_TEST);
+    glBlitFramebuffer(0, 0, size.width(), size.height(), 0, 0, size.width(), size.height(), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &drawFramebuffer);
+    auto readyFence = GLFence::create(display.glDisplay());
+    grContext->resetContext(kRenderTarget_GrGLBackendState | kTextureBinding_GrGLBackendState | kView_GrGLBackendState);
+
+    const auto& imageInfo = m_surface->imageInfo();
+    auto backendFormat = threadSafeGrContext->defaultBackendFormat(kRGBA_8888_SkColorType, GrRenderable::kNo);
+    auto* context = new CompositorBufferPromiseContext { WTF::move(pool), WTF::move(*lease), WTF::move(readyFence) };
+    auto image = SkImages::PromiseTextureFrom(threadSafeGrContext, backendFormat, SkISize::Make(size.width(), size.height()), skgpu::Mipmapped::kNo,
+        kTopLeft_GrSurfaceOrigin, kRGBA_8888_SkColorType, imageInfo.alphaType(), imageInfo.refColorSpace(),
+        +[](void* userData) -> sk_sp<GrPromiseImageTexture> {
+            return static_cast<CompositorBufferPromiseContext*>(userData)->fulfill();
+        },
+        +[](void* userData) {
+            std::unique_ptr<CompositorBufferPromiseContext> context(static_cast<CompositorBufferPromiseContext*>(userData));
+            context->release();
+        }, context);
+    if (!image)
+        return nullptr;
+
+    using Buffer = CoordinatedPlatformLayerBufferSkiaImage;
+    return makeUnique<Buffer>(WTF::move(image), imageInfo.alphaType() == kOpaque_SkAlphaType ? Buffer::AlphaMode::Opaque : Buffer::AlphaMode::Premultiplied, Buffer::Rotation::None);
+}
+#endif
 #endif
 
 } // namespace WebCore

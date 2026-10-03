@@ -164,6 +164,9 @@ public:
     virtual bool isNullImageBufferBackend() const { return false; }
 
     virtual RefPtr<GraphicsLayerContentsDisplayDelegate> layerContentsDisplayDelegate() const { return nullptr; }
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    virtual std::unique_ptr<CoordinatedPlatformLayerBuffer> createCompositorDisplayBuffer(const sk_sp<GrContextThreadSafeProxy>&) { return nullptr; }
+#endif
 
     virtual void prepareForDisplay() { }
 

@@ -56,6 +56,9 @@
 #include "ImageBufferSkiaAcceleratedBackend.h"
 #include "PlatformDisplay.h"
 #include "SkiaSerializedImageBuffer.h"
+#if USE(COORDINATED_GRAPHICS)
+#include "CoordinatedPlatformLayerBuffer.h"
+#endif
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/gpu/ganesh/GrBackendSurface.h>
@@ -483,6 +486,15 @@ RefPtr<GraphicsLayerContentsDisplayDelegate> ImageBuffer::layerContentsDisplayDe
         return backend->layerContentsDisplayDelegate();
     return nullptr;
 }
+
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+std::unique_ptr<CoordinatedPlatformLayerBuffer> ImageBuffer::createCompositorDisplayBuffer(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext)
+{
+    if (auto* backend = m_backend.get())
+        return backend->createCompositorDisplayBuffer(threadSafeGrContext);
+    return nullptr;
+}
+#endif
 
 RefPtr<NativeImage> ImageBuffer::sinkIntoNativeImage(RefPtr<ImageBuffer> source)
 {

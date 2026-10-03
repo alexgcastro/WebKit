@@ -29,7 +29,17 @@
 #if USE(COORDINATED_GRAPHICS)
 #include "CoordinatedPlatformLayer.h"
 #include "CoordinatedPlatformLayerBuffer.h"
+#include "NativeImage.h"
+#include <wtf/Box.h>
 #include <wtf/threads/BinarySemaphore.h>
+
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+#include "GLContext.h"
+#include "PlatformDisplay.h"
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkImage.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#endif
 
 namespace WebCore {
 
@@ -40,27 +50,21 @@ Ref<CoordinatedPlatformLayerBufferProxy> CoordinatedPlatformLayerBufferProxy::cr
 
 CoordinatedPlatformLayerBufferProxy::CoordinatedPlatformLayerBufferProxy(Ref<CoordinatedPlatformLayer>&& layer)
     : m_layer(WTF::move(layer))
-#if ENABLE(VIDEO) && USE(GSTREAMER_GL)
     , m_compositingRunLoop(m_layer->compositingRunLoop())
-#endif
 {
 }
 
 CoordinatedPlatformLayerBufferProxy::~CoordinatedPlatformLayerBufferProxy()
 {
     ASSERT(!m_layer);
-#if ENABLE(VIDEO) && USE(GSTREAMER_GL)
     ASSERT(!m_compositingRunLoop);
-#endif
 }
 
 void CoordinatedPlatformLayerBufferProxy::invalidate()
 {
     assertIsMainThread();
     m_layer = nullptr;
-#if ENABLE(VIDEO) && USE(GSTREAMER_GL)
     m_compositingRunLoop = nullptr;
-#endif
 }
 
 void CoordinatedPlatformLayerBufferProxy::setInitialDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&& buffer)
@@ -97,6 +101,43 @@ void CoordinatedPlatformLayerBufferProxy::setDisplayBuffer(std::unique_ptr<Coord
     }
     layer->requestComposition(CompositionReason::VideoFrame);
 }
+
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+RefPtr<NativeImage> CoordinatedPlatformLayerBufferProxy::copyImage(const sk_sp<SkImage>& image)
+{
+    assertIsMainThread();
+    RefPtr compositingRunLoop = m_compositingRunLoop;
+    if (!image || !compositingRunLoop)
+        return nullptr;
+
+    struct ImageCopy {
+        BinarySemaphore semaphore;
+        RefPtr<NativeImage> copy;
+    };
+    auto imageCopy = Box<ImageCopy>::create();
+    compositingRunLoop->dispatch([image, imageCopy] {
+        auto& display = PlatformDisplay::sharedDisplay();
+        auto* glContext = display.skiaGLContext();
+        if (glContext && glContext->makeContextCurrent()) {
+            if (auto rasterImage = image->makeRasterImage(display.skiaGrContext()))
+                imageCopy->copy = NativeImage::create(WTF::move(rasterImage));
+        }
+        imageCopy->semaphore.signal();
+    });
+    static constexpr Seconds copyImageTimeout { 1_s };
+    if (!imageCopy->semaphore.waitFor(copyImageTimeout))
+        return nullptr;
+    return WTF::move(imageCopy->copy);
+}
+
+void CoordinatedPlatformLayerBufferProxy::releaseImageOnCompositingThread(sk_sp<SkImage> image)
+{
+    if (!image)
+        return;
+    if (RefPtr compositingRunLoop = m_compositingRunLoop)
+        compositingRunLoop->dispatch([image = WTF::move(image)] { });
+}
+#endif
 
 #if ENABLE(VIDEO) && USE(GSTREAMER_GL)
 void CoordinatedPlatformLayerBufferProxy::dropCurrentBufferWhilePreservingTexture(ShouldWait shouldWait)

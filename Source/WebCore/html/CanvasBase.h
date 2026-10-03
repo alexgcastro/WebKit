@@ -94,6 +94,7 @@ public:
     void addObserver(CanvasObserver&);
     void removeObserver(CanvasObserver&);
     bool NODELETE hasObserver(CanvasObserver&) const;
+    bool hasObservers() const { return !m_observers.isEmptyIgnoringNullReferences(); }
     void notifyObserversContentsWillChange(const FloatRect&);
     void notifyObserversCanvasResized();
     void notifyObserversCanvasDestroyed(); // Must be called in destruction before clearing m_context.

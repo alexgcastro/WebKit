@@ -33,6 +33,7 @@
 
 #if !USE(TEXTURE_MAPPER)
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkImage.h>
 #include <skia/gpu/ganesh/GrContextThreadSafeProxy.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #endif
@@ -41,6 +42,7 @@ namespace WebCore {
 class CoordinatedPlatformLayer;
 class CoordinatedPlatformLayerBuffer;
 class IntSize;
+class NativeImage;
 class TextureMapperLayer;
 
 class CoordinatedPlatformLayerBufferProxy final : public ThreadSafeRefCounted<CoordinatedPlatformLayerBufferProxy> {
@@ -54,6 +56,11 @@ public:
     void consumePendingBufferIfNeeded();
     void setInitialDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
     void setDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
+
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+    RefPtr<NativeImage> copyImage(const sk_sp<SkImage>&);
+    void releaseImageOnCompositingThread(sk_sp<SkImage>);
+#endif
 
 #if ENABLE(VIDEO) && USE(GSTREAMER_GL)
     enum class ShouldWait : bool { No, Yes };
@@ -69,9 +76,7 @@ private:
 
     RefPtr<CoordinatedPlatformLayer> m_layer;
     std::unique_ptr<CoordinatedPlatformLayerBuffer> m_pendingBuffer WTF_GUARDED_BY_CAPABILITY(mainThread);
-#if ENABLE(VIDEO) && USE(GSTREAMER)
     RefPtr<RunLoop> m_compositingRunLoop;
-#endif
 };
 
 } // namespace WebCore

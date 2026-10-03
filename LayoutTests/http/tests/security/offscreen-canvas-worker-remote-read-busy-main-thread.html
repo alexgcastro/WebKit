@@ -1,0 +1,47 @@
+<script src="/js-test-resources/js-test.js"></script>
+<body>
+<canvas width="200" height="200"></canvas>
+<script>
+description("Test that a placeholder canvas never exposes a cross-origin frame before it is marked as tainted.");
+window.jsTestIsAsync = true;
+
+(async () => {
+    const image = new Image;
+    image.src = "http://localhost:8000/security/resources/abe.png";
+    await image.decode();
+    const bitmap = await createImageBitmap(image);
+
+    const canvas = document.querySelector("canvas");
+    const offscreen = canvas.transferControlToOffscreen();
+    const context = offscreen.getContext("2d");
+    context.fillStyle = "green";
+    context.fillRect(0, 0, 200, 200);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    let leaked = 0, threw = 0, attempts = 0;
+    const channel = new MessageChannel;
+    channel.port1.onmessage = () => {
+        attempts++;
+        try {
+            const probe = document.createElement("canvas");
+            probe.width = probe.height = 200;
+            const probeContext = probe.getContext("2d");
+            probeContext.drawImage(canvas, 0, 0);
+            const pixel = probeContext.getImageData(100, 100, 1, 1).data;
+            if (!(pixel[0] == 0 && pixel[1] == 128 && pixel[2] == 0))
+                leaked++;
+        } catch (e) {
+            threw++;
+        }
+        if (attempts < 50 && !threw)
+            channel.port2.postMessage(0);
+        else {
+            debug(leaked ? "FAIL the cross-origin frame was readable " + leaked + " time(s) before the canvas was tainted." : "PASS the cross-origin frame was never readable.");
+            finishJSTest();
+        }
+    };
+    context.drawImage(bitmap, 0, 0, 200, 200);
+    channel.port2.postMessage(0);
+})();
+</script>
+</body>

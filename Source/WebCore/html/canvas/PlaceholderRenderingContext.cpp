@@ -33,9 +33,11 @@
 #include "ContextDestructionObserverInlines.h"
 #include "Document.h"
 #include "DocumentPage.h"
+#include "GraphicsContext.h"
 #include "GraphicsLayer.h"
 #include "GraphicsLayerContentsDisplayDelegate.h"
 #include "HTMLCanvasElement.h"
+#include "ImageBuffer.h"
 #include "NativeImage.h"
 #include "NodeDocument.h"
 #include "OffscreenCanvas.h"
@@ -48,13 +50,16 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(PlaceholderLayerContents);
 
-void PlaceholderLayerContents::copyFrame(ImageBuffer& imageBuffer, bool opaque, PlaceholderFrameIdentifier frame)
+bool PlaceholderLayerContents::copyFrame(ImageBuffer& imageBuffer, bool originClean, bool opaque, PlaceholderFrameIdentifier frame)
 {
     Locker locker { m_lock };
     if (!m_delegate || frame <= m_frame)
-        return;
-    protect(m_delegate)->tryCopyToLayer(imageBuffer, opaque, frame);
+        return false;
+    if (!protect(m_delegate)->tryCopyToLayer(imageBuffer, opaque, frame))
+        return false;
     m_frame = frame;
+    m_frameMetadata = FrameMetadata { imageBuffer.truncatedLogicalSize(), originClean, opaque };
+    return true;
 }
 
 void PlaceholderLayerContents::setFrameForNextDisplay(ImageBuffer& imageBuffer, bool opaque, PlaceholderFrameIdentifier frame)
@@ -65,6 +70,7 @@ void PlaceholderLayerContents::setFrameForNextDisplay(ImageBuffer& imageBuffer, 
         return;
     protect(m_delegate)->setContentsForNextDisplay(imageBuffer, opaque, frame);
     m_frame = frame;
+    m_frameMetadata = std::nullopt;
 }
 
 std::optional<PlatformLayerIdentifier> PlaceholderLayerContents::attach(GraphicsLayer& layer, ImageBuffer* buffer, bool opaque, PlaceholderFrameIdentifier frame)
@@ -73,11 +79,45 @@ std::optional<PlatformLayerIdentifier> PlaceholderLayerContents::attach(Graphics
     Locker locker { m_lock };
     if (!(m_delegate = layer.createAsyncContentsDisplayDelegate(m_delegate.get())))
         return std::nullopt;
-    if (buffer) {
-        protect(m_delegate)->tryCopyToLayer(*buffer, opaque, frame);
-        m_frame = frame;
+    Ref delegate = *m_delegate;
+    if (buffer && frame > m_frame) {
+        if (delegate->tryCopyToLayer(*buffer, opaque, frame)) {
+            m_frame = frame;
+            m_frameMetadata = std::nullopt;
+        }
     }
-    return protect(m_delegate)->destinationLayerID();
+    return delegate->destinationLayerID();
+}
+
+PlaceholderFrameIdentifier PlaceholderLayerContents::currentFrame()
+{
+    Locker locker { m_lock };
+    return m_frame;
+}
+
+auto PlaceholderLayerContents::currentFrameMetadataIfNewerThan(PlaceholderFrameIdentifier frame) -> std::optional<Frame>
+{
+    Locker locker { m_lock };
+    if (m_frame <= frame)
+        return std::nullopt;
+    return Frame { m_frame, m_frameMetadata, nullptr };
+}
+
+auto PlaceholderLayerContents::copyCurrentFrameIfNewerThan(PlaceholderFrameIdentifier frame) -> std::optional<Frame>
+{
+    assertIsMainThread();
+    Locker locker { m_lock };
+    if (!m_delegate || m_frame <= frame)
+        return std::nullopt;
+    return Frame { m_frame, m_frameMetadata, protect(m_delegate)->copyCurrentBuffer() };
+}
+
+bool PlaceholderLayerContents::canCopyCurrentFrame()
+{
+    if (m_needsFramesOnMainThread.load(std::memory_order_relaxed))
+        return false;
+    Locker locker { m_lock };
+    return m_delegate && m_delegate->canCopyCurrentBuffer();
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(LocalPlaceholderRenderingContextSource);
@@ -99,7 +139,18 @@ LocalPlaceholderRenderingContextSource::~LocalPlaceholderRenderingContextSource(
 void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& imageBuffer, bool originClean, bool opaque)
 {
     auto frame = m_lastFrame.increment();
-    m_layerContents->copyFrame(imageBuffer, opaque, frame);
+    if (m_layerContents->copyFrame(imageBuffer, originClean, opaque, frame) && m_layerContents->canCopyCurrentFrame()) {
+        FrameMetadata metadata { imageBuffer.truncatedLogicalSize(), originClean, opaque };
+        if (m_lastMetadata == metadata)
+            return;
+        m_lastMetadata = metadata;
+        callOnMainThread([protectedThis = Ref { *this }] {
+            if (RefPtr placeholder = protectedThis->m_placeholder.get())
+                placeholder->updateFrameMetadata();
+        });
+        return;
+    }
+    m_lastMetadata = std::nullopt;
 
     RefPtr clone = imageBuffer.clone();
     if (!clone)
@@ -120,6 +171,19 @@ void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& i
     });
 }
 
+void LocalPlaceholderRenderingContextSource::offscreenCanvasWillBeDestroyed()
+{
+    if (!m_layerContents->canCopyCurrentFrame())
+        return;
+    auto currentFrame = m_layerContents->currentFrame();
+    std::optional<PendingFrame> pendingFrame;
+    {
+        Locker locker { m_pendingFrameLock };
+        if (m_pendingFrame && m_pendingFrame->frame <= currentFrame)
+            pendingFrame = std::exchange(m_pendingFrame, std::nullopt);
+    }
+}
+
 void LocalPlaceholderRenderingContextSource::commitPendingFrame()
 {
     assertIsMainThread();
@@ -138,7 +202,7 @@ void LocalPlaceholderRenderingContextSource::commitPendingFrame()
         return;
     // Compares the frames, so that a possibly already historical buffer in this main thread
     // task does not override the newest buffer that the worker thread already set.
-    protect(placeholder->layerContents())->copyFrame(*imageBuffer, pendingFrame->opaque, pendingFrame->frame);
+    protect(placeholder->layerContents())->copyFrame(*imageBuffer, pendingFrame->originClean, pendingFrame->opaque, pendingFrame->frame);
     placeholder->setPlaceholderBuffer(imageBuffer.releaseNonNull(), pendingFrame->frame, pendingFrame->originClean, pendingFrame->opaque);
 }
 
@@ -179,6 +243,7 @@ PlaceholderRenderingContext::PlaceholderRenderingContext(HTMLCanvasElement& canv
     placeholderRenderingContexts().add(m_identifier, *this);
     if (placeholderCreatedHandler)
         placeholderCreatedHandler(m_identifier);
+    m_layerContents->setNeedsFramesOnMainThread(canvas.hasObservers());
 }
 
 PlaceholderRenderingContext::~PlaceholderRenderingContext()
@@ -200,7 +265,7 @@ IntSize PlaceholderRenderingContext::size() const
 
 void PlaceholderRenderingContext::setContentsToLayer(GraphicsLayer& layer)
 {
-    auto layerID = m_layerContents->attach(layer, m_buffer.get(), m_opaque, m_frame);
+    auto layerID = m_layerContents->attach(layer, protect(m_buffer).get(), m_opaque, m_frame);
     if (m_reportedLayerID.asOptional() == layerID)
         return;
     m_reportedLayerID = layerID;
@@ -236,15 +301,66 @@ void PlaceholderRenderingContext::setPlaceholderBuffer(Ref<ImageBuffer>&& newBuf
     IntSize newSize = newBuffer->truncatedLogicalSize();
     Ref canvas = this->canvas();
     canvas->willUpdateContents(FloatRect { { }, newSize }, ShouldApplyPostProcessingToDirtyRect::No);
-    m_opaque = opaque;
     updateMemoryCost(newBuffer->memoryCost());
     m_buffer = WTF::move(newBuffer);
     m_bufferNativeImage = nullptr;
-    canvas->setSizeForControllingContext(newSize);
-    if (originClean)
+    if (m_metadataFrame < frame)
+        m_metadataFrame = frame;
+    applyFrameMetadata({ newSize, originClean, opaque });
+}
+
+void PlaceholderRenderingContext::updateFrameMetadata()
+{
+    auto currentFrame = m_layerContents->currentFrameMetadataIfNewerThan(m_metadataFrame);
+    if (!currentFrame || !currentFrame->metadata)
+        return;
+    m_metadataFrame = currentFrame->identifier;
+    applyFrameMetadata(*currentFrame->metadata);
+}
+
+void PlaceholderRenderingContext::applyFrameMetadata(const PlaceholderLayerContents::FrameMetadata& metadata)
+{
+    m_opaque = metadata.opaque;
+    Ref canvas = this->canvas();
+    canvas->setSizeForControllingContext(metadata.size);
+    if (metadata.originClean)
         canvas->setOriginClean();
     else
         canvas->setOriginTainted();
+}
+
+void PlaceholderRenderingContext::updateFromCurrentFrameIfNeeded()
+{
+    auto currentFrame = m_layerContents->copyCurrentFrameIfNewerThan(m_frame);
+    if (!currentFrame)
+        return;
+    bool wasOriginClean = canvas().originClean();
+    if (currentFrame->metadata && m_metadataFrame < currentFrame->identifier) {
+        m_metadataFrame = currentFrame->identifier;
+        applyFrameMetadata(*currentFrame->metadata);
+    }
+    if (!currentFrame->image || (wasOriginClean && !canvas().originClean()))
+        return;
+    m_frame = currentFrame->identifier;
+    m_buffer = nullptr;
+    m_bufferNativeImage = WTF::move(currentFrame->image);
+    updateMemoryCost(m_bufferNativeImage->sizeInBytes());
+}
+
+RefPtr<ImageBuffer> PlaceholderRenderingContext::ensureBufferFromNativeImage()
+{
+    if (m_buffer || !m_bufferNativeImage)
+        return m_buffer;
+    auto size = m_bufferNativeImage->size();
+    m_buffer = ImageBuffer::create(size, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified, 1, m_bufferNativeImage->colorSpace(), PixelFormat::BGRA8);
+    if (m_buffer)
+        m_buffer->context().drawNativeImage(*m_bufferNativeImage, FloatRect { { }, size }, FloatRect { { }, size }, { CompositeOperator::Copy });
+    return m_buffer;
+}
+
+void PlaceholderRenderingContext::didChangeCanvasObservers()
+{
+    m_layerContents->setNeedsFramesOnMainThread(canvas().hasObservers());
 }
 
 PixelFormat PlaceholderRenderingContext::pixelFormat() const
@@ -256,7 +372,8 @@ PixelFormat PlaceholderRenderingContext::pixelFormat() const
 
 RefPtr<ImageBuffer> PlaceholderRenderingContext::surfaceBufferToImageBuffer(SurfaceBuffer)
 {
-    if (!m_buffer) {
+    updateFromCurrentFrameIfNeeded();
+    if (!ensureBufferFromNativeImage()) {
         // Transparent black bitmaps are not cached.
         return protect(canvas())->createTransparentBlackImageBuffer();
     }
@@ -265,6 +382,7 @@ RefPtr<ImageBuffer> PlaceholderRenderingContext::surfaceBufferToImageBuffer(Surf
 
 RefPtr<NativeImage> PlaceholderRenderingContext::surfaceBufferToNativeImage(SurfaceBuffer)
 {
+    updateFromCurrentFrameIfNeeded();
     if (m_bufferNativeImage)
         return m_bufferNativeImage;
     RefPtr buffer = m_buffer;
@@ -278,7 +396,7 @@ RefPtr<NativeImage> PlaceholderRenderingContext::surfaceBufferToNativeImage(Surf
 
 bool PlaceholderRenderingContext::isSurfaceBufferTransparentBlack(SurfaceBuffer) const
 {
-    return !m_buffer;
+    return !m_buffer && !m_bufferNativeImage && !m_layerContents->currentFrame();
 }
 
 void PlaceholderRenderingContext::didUpdateCanvasSizeProperties(bool)

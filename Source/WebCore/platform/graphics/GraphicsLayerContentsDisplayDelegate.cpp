@@ -26,6 +26,8 @@
 #include "config.h"
 #include "GraphicsLayerContentsDisplayDelegate.h"
 
+#include "NativeImage.h"
+
 #if USE(CA)
 #include "GraphicsLayerCA.h"
 #endif
@@ -33,6 +35,11 @@
 namespace WebCore {
 
 GraphicsLayerContentsDisplayDelegate::~GraphicsLayerContentsDisplayDelegate() = default;
+
+RefPtr<NativeImage> GraphicsLayerAsyncContentsDisplayDelegate::copyCurrentBuffer()
+{
+    return nullptr;
+}
 
 #if USE(CA)
 void GraphicsLayerContentsDisplayDelegate::prepareToDelegateDisplay(PlatformCALayer&)
