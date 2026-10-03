@@ -50,12 +50,12 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(PlaceholderLayerContents);
 
-bool PlaceholderLayerContents::copyFrame(ImageBuffer& imageBuffer, bool originClean, bool opaque, PlaceholderFrameIdentifier frame)
+bool PlaceholderLayerContents::copyFrame(ImageBuffer& imageBuffer, bool originClean, bool opaque, PlaceholderFrameIdentifier frame, RefPtr<GraphicsLayerFrameDisplayNotifier>&& displayNotifier)
 {
     Locker locker { m_lock };
     if (!m_delegate || frame <= m_frame)
         return false;
-    if (!protect(m_delegate)->tryCopyToLayer(imageBuffer, opaque, frame))
+    if (!protect(m_delegate)->tryPresent(imageBuffer, opaque, frame, WTF::move(displayNotifier)))
         return false;
     m_frame = frame;
     m_frameMetadata = FrameMetadata { imageBuffer.truncatedLogicalSize(), originClean, opaque };
@@ -136,10 +136,10 @@ LocalPlaceholderRenderingContextSource::LocalPlaceholderRenderingContextSource(P
 
 LocalPlaceholderRenderingContextSource::~LocalPlaceholderRenderingContextSource() = default;
 
-void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& imageBuffer, bool originClean, bool opaque)
+void LocalPlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& imageBuffer, bool originClean, bool opaque, RefPtr<GraphicsLayerFrameDisplayNotifier>&& displayNotifier)
 {
     auto frame = m_lastFrame.increment();
-    if (m_layerContents->copyFrame(imageBuffer, originClean, opaque, frame) && m_layerContents->canCopyCurrentFrame()) {
+    if (m_layerContents->copyFrame(imageBuffer, originClean, opaque, frame, WTF::move(displayNotifier)) && m_layerContents->canCopyCurrentFrame()) {
         FrameMetadata metadata { imageBuffer.truncatedLogicalSize(), originClean, opaque };
         if (m_lastMetadata == metadata)
             return;

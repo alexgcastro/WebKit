@@ -82,6 +82,7 @@ public:
 
 #if ENABLE(OFFSCREEN_CANVAS_IN_WORKERS)
     CallbackId requestAnimationFrame(Ref<RequestAnimationFrameCallback>&&);
+    WorkerAnimationController* workerAnimationController() const { return m_workerAnimationController.get(); }
     void cancelAnimationFrame(CallbackId);
 #endif
 

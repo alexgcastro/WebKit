@@ -32,6 +32,7 @@
 #include "CanvasRenderingContext.h"
 #include "ContextDestructionObserverInlines.h"
 #include "Chrome.h"
+#include "DedicatedWorkerGlobalScope.h"
 #include "DOMMatrix.h"
 #include "Document.h"
 #include "EventDispatcher.h"
@@ -39,6 +40,7 @@
 #include "GPU.h"
 #include "GPUCanvasContext.h"
 #include "GraphicsClient.h"
+#include "GraphicsLayerContentsDisplayDelegate.h"
 #include "HTMLCanvasElement.h"
 #include "ImageBitmap.h"
 #include "ImageBitmapRenderingContext.h"
@@ -54,6 +56,7 @@
 #include "PlaceholderRenderingContext.h"
 #include "ScriptTrackingPrivacyCategory.h"
 #include "UpdateElementGeometryOptions.h"
+#include "WorkerAnimationController.h"
 #include "WorkerClient.h"
 #include "WorkerGlobalScope.h"
 #include "WorkerNavigator.h"
@@ -444,7 +447,14 @@ void OffscreenCanvas::commitToPlaceholderCanvas()
     RefPtr imageBuffer = context->surfaceBufferToImageBuffer(CanvasRenderingContext::SurfaceBuffer::DisplayBuffer);
     if (!imageBuffer)
         return;
-    protect(m_placeholderSource)->setPlaceholderBuffer(*imageBuffer, protect(context->canvasBase())->originClean(), context->isOpaque());
+    RefPtr<GraphicsLayerFrameDisplayNotifier> displayNotifier;
+#if ENABLE(OFFSCREEN_CANVAS_IN_WORKERS)
+    if (RefPtr workerGlobalScope = dynamicDowncast<DedicatedWorkerGlobalScope>(scriptExecutionContext())) {
+        if (RefPtr animationController = workerGlobalScope->workerAnimationController())
+            displayNotifier = animationController->createFrameDisplayNotifier();
+    }
+#endif
+    protect(m_placeholderSource)->setPlaceholderBuffer(*imageBuffer, protect(context->canvasBase())->originClean(), context->isOpaque(), WTF::move(displayNotifier));
 }
 
 void OffscreenCanvas::scheduleCommitToPlaceholderCanvas()

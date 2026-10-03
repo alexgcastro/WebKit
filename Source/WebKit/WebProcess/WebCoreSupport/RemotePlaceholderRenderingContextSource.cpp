@@ -49,7 +49,7 @@ RemotePlaceholderRenderingContextSource::RemotePlaceholderRenderingContextSource
 {
 }
 
-void RemotePlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& buffer, bool originClean, bool opaque)
+void RemotePlaceholderRenderingContextSource::setPlaceholderBuffer(ImageBuffer& buffer, bool originClean, bool opaque, RefPtr<WebCore::GraphicsLayerFrameDisplayNotifier>&&)
 {
     if (m_placeholderDestroyed)
         return;

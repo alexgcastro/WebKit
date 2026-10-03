@@ -30,6 +30,7 @@
 
 #if ENABLE(OFFSCREEN_CANVAS_IN_WORKERS)
 
+#include "GraphicsLayerContentsDisplayDelegate.h"
 #include "InspectorInstrumentation.h"
 #include "Performance.h"
 #include "RequestAnimationFrameCallback.h"
@@ -66,6 +67,31 @@ void WorkerAnimationController::stop()
 {
     m_animationTimer.stop();
     m_animationCallbacks.clear();
+    m_isWaitingForDisplayedFrame = false;
+}
+
+Ref<GraphicsLayerFrameDisplayNotifier> WorkerAnimationController::createFrameDisplayNotifier()
+{
+    ++m_framesWaitingForDisplay;
+    return GraphicsLayerFrameDisplayNotifier::create([identifier = m_workerGlobalScope->identifier(), weakThis = ThreadSafeWeakPtr { *this }, generation = m_frameDisplayGeneration] {
+        ScriptExecutionContext::postTaskTo(identifier, [weakThis, generation](ScriptExecutionContext&) {
+            if (RefPtr protectedThis = weakThis.get())
+                protectedThis->didDisplayFrame(generation);
+        });
+    });
+}
+
+void WorkerAnimationController::didDisplayFrame(unsigned generation)
+{
+    if (generation != m_frameDisplayGeneration)
+        return;
+    if (m_framesWaitingForDisplay)
+        --m_framesWaitingForDisplay;
+    if (m_framesWaitingForDisplay || !m_isWaitingForDisplayedFrame)
+        return;
+    m_isWaitingForDisplayedFrame = false;
+    m_animationTimer.stop();
+    animationTimerFired();
 }
 
 void WorkerAnimationController::suspend(ReasonForSuspension)
@@ -123,6 +149,16 @@ void WorkerAnimationController::scheduleAnimation()
 
 void WorkerAnimationController::animationTimerFired()
 {
+    if (m_framesWaitingForDisplay && !m_isWaitingForDisplayedFrame) {
+        m_isWaitingForDisplayedFrame = true;
+        m_animationTimer.startOneShot(maximumWaitForDisplayedFrame);
+        return;
+    }
+    m_isWaitingForDisplayedFrame = false;
+    if (m_framesWaitingForDisplay) {
+        m_framesWaitingForDisplay = 0;
+        ++m_frameDisplayGeneration;
+    }
     m_lastAnimationFrameTimestamp = protect(m_workerGlobalScope->performance())->now();
     serviceRequestAnimationFrameCallbacks(m_lastAnimationFrameTimestamp);
 }

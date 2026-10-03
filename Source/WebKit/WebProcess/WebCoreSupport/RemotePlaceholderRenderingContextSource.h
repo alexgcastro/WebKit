@@ -45,7 +45,7 @@ public:
 private:
     explicit RemotePlaceholderRenderingContextSource(const WebCore::RemotePlaceholderRenderingContextIdentifier&);
 
-    void setPlaceholderBuffer(WebCore::ImageBuffer&, bool originClean, bool opaque) final;
+    void setPlaceholderBuffer(WebCore::ImageBuffer&, bool originClean, bool opaque, RefPtr<WebCore::GraphicsLayerFrameDisplayNotifier>&&) final;
 
     std::atomic<bool> m_placeholderDestroyed { false };
 };

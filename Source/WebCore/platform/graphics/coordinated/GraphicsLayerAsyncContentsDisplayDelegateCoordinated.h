@@ -59,6 +59,7 @@ private:
     void display(CoordinatedPlatformLayer&, std::optional<Damage>&&) override { RELEASE_ASSERT_NOT_REACHED(); }
 
     bool tryCopyToLayer(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier) override;
+    bool tryPresent(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier, RefPtr<GraphicsLayerFrameDisplayNotifier>&&) override;
 #if USE(SKIA) && !USE(TEXTURE_MAPPER)
     bool canCopyCurrentBuffer() const override { return true; }
     RefPtr<NativeImage> copyCurrentBuffer() override;

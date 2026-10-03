@@ -1287,6 +1287,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
 
     if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
         if (m_pendingChanges.contains(Change::ContentsBuffer)) {
+            if (m_contentsBuffer.pending)
+                m_contentsBuffer.pending->didCommitToCompositor();
             m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
             m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
             m_pendingChanges.remove(Change::ContentsBuffer);
@@ -1513,6 +1515,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
 #endif
         if (m_pendingChanges.contains(Change::ContentsBuffer)) {
             m_contentsBuffer.hasCommitted = !!m_contentsBuffer.pending;
+            if (m_contentsBuffer.pending)
+                m_contentsBuffer.pending->didCommitToCompositor();
             layer.setContentsBuffer(WTF::move(m_contentsBuffer.pending));
             m_pendingChanges.remove(Change::ContentsBuffer);
         }

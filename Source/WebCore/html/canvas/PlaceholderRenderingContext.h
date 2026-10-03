@@ -64,7 +64,7 @@ public:
     };
 
     // Shows the frame unless a newer one is already shown. On any thread.
-    bool copyFrame(ImageBuffer&, bool originClean, bool opaque, PlaceholderFrameIdentifier);
+    bool copyFrame(ImageBuffer&, bool originClean, bool opaque, PlaceholderFrameIdentifier, RefPtr<GraphicsLayerFrameDisplayNotifier>&& = nullptr);
     // Like copyFrame(), for a buffer that nothing will draw into again. It reaches the compositor
     // with the next rendering update. On the main thread.
     void setFrameForNextDisplay(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier);
@@ -98,7 +98,7 @@ public:
     static Ref<LocalPlaceholderRenderingContextSource> create(PlaceholderRenderingContext&);
     ~LocalPlaceholderRenderingContextSource();
 
-    void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque) final;
+    void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque, RefPtr<GraphicsLayerFrameDisplayNotifier>&&) final;
     void offscreenCanvasWillBeDestroyed() final;
 
 private:

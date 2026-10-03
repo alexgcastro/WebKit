@@ -34,6 +34,7 @@
 
 namespace WebCore {
 
+class GraphicsLayerFrameDisplayNotifier;
 class ImageBuffer;
 struct ImageBufferTransferHandle;
 
@@ -50,7 +51,7 @@ public:
     const RemotePlaceholderRenderingContextIdentifier& remoteIdentifier() const LIFETIME_BOUND { return m_identifier; }
 
     // Called by the offscreen context to submit the frame.
-    virtual void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque) = 0;
+    virtual void setPlaceholderBuffer(ImageBuffer&, bool originClean, bool opaque, RefPtr<GraphicsLayerFrameDisplayNotifier>&&) = 0;
     virtual void offscreenCanvasWillBeDestroyed() { }
 
     // Where a source in another process delivers its frames: straight to the placeholder, on the main

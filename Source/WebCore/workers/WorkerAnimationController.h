@@ -37,6 +37,7 @@
 
 namespace WebCore {
 
+class GraphicsLayerFrameDisplayNotifier;
 class RequestAnimationFrameCallback;
 class WeakPtrImplWithEventTargetData;
 class WorkerGlobalScope;
@@ -48,6 +49,8 @@ public:
 
     int requestAnimationFrame(Ref<RequestAnimationFrameCallback>&&);
     void cancelAnimationFrame(int);
+
+    Ref<GraphicsLayerFrameDisplayNotifier> createFrameDisplayNotifier();
 
     // ActiveDOMObject.
     void ref() const final { ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr::ref(); }
@@ -62,6 +65,7 @@ private:
     void suspend(ReasonForSuspension) final;
     void resume() final;
 
+    void didDisplayFrame(unsigned generation);
     void scheduleAnimation();
     void animationTimerFired();
     void serviceRequestAnimationFrameCallbacks(DOMHighResTimeStamp timestamp);
@@ -76,7 +80,12 @@ private:
     Timer m_animationTimer;
     DOMHighResTimeStamp m_lastAnimationFrameTimestamp { 0 };
 
+    static constexpr Seconds maximumWaitForDisplayedFrame { 100_ms };
+
     bool m_savedIsActive { false };
+    unsigned m_framesWaitingForDisplay { 0 };
+    unsigned m_frameDisplayGeneration { 0 };
+    bool m_isWaitingForDisplayedFrame { false };
 };
 
 } // namespace WebCore

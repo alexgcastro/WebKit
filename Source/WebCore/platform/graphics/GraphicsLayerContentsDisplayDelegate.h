@@ -27,6 +27,8 @@
 
 #include <WebCore/PlaceholderFrameIdentifier.h>
 #include <WebCore/PlatformLayerIdentifier.h>
+#include <wtf/Function.h>
+#include <wtf/Lock.h>
 #include <wtf/ThreadSafeRefCounted.h>
 
 #if !USE(CA) && !USE(COORDINATED_GRAPHICS)
@@ -51,6 +53,39 @@ class Damage;
 #endif
 
 enum class GraphicsLayerCompositingCoordinatesOrientation : uint8_t;
+
+class GraphicsLayerFrameDisplayNotifier final : public ThreadSafeRefCounted<GraphicsLayerFrameDisplayNotifier> {
+public:
+    static Ref<GraphicsLayerFrameDisplayNotifier> create(Function<void()>&& handler)
+    {
+        return adoptRef(*new GraphicsLayerFrameDisplayNotifier(WTF::move(handler)));
+    }
+
+    ~GraphicsLayerFrameDisplayNotifier()
+    {
+        notify();
+    }
+
+    void notify()
+    {
+        Function<void()> handler;
+        {
+            Locker locker { m_lock };
+            handler = std::exchange(m_handler, nullptr);
+        }
+        if (handler)
+            handler();
+    }
+
+private:
+    explicit GraphicsLayerFrameDisplayNotifier(Function<void()>&& handler)
+        : m_handler(WTF::move(handler))
+    {
+    }
+
+    Lock m_lock;
+    Function<void()> m_handler WTF_GUARDED_BY_LOCK(m_lock);
+};
 
 // Platform specific interface for attaching contents to GraphicsLayer.
 // Responsible for creating compositor resources to show the particular contents
@@ -94,6 +129,7 @@ public:
 
     virtual bool canCopyCurrentBuffer() const { return false; }
     virtual RefPtr<NativeImage> copyCurrentBuffer();
+    virtual bool tryPresent(ImageBuffer& buffer, bool opaque, PlaceholderFrameIdentifier frame, RefPtr<GraphicsLayerFrameDisplayNotifier>&&) { return tryCopyToLayer(buffer, opaque, frame); }
 
     // Set only when the layer is hosted in another process, and so can be targeted from one.
     virtual std::optional<PlatformLayerIdentifier> destinationLayerID() const { return std::nullopt; }

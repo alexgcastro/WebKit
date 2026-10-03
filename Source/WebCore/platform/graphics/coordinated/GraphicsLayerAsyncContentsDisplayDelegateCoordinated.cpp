@@ -85,7 +85,12 @@ void GraphicsLayerAsyncContentsDisplayDelegateCoordinated::bindBufferProxy(Graph
 #endif
 }
 
-bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryCopyToLayer(ImageBuffer& imageBuffer, bool, PlaceholderFrameIdentifier)
+bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryCopyToLayer(ImageBuffer& imageBuffer, bool opaque, PlaceholderFrameIdentifier frame)
+{
+    return tryPresent(imageBuffer, opaque, frame, nullptr);
+}
+
+bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryPresent(ImageBuffer& imageBuffer, bool, PlaceholderFrameIdentifier, RefPtr<GraphicsLayerFrameDisplayNotifier>&& frameDisplayNotifier)
 {
     RefPtr bufferProxy = m_bufferProxy;
     if (!bufferProxy)
@@ -95,7 +100,9 @@ bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryCopyToLayer(ImageB
     auto image = ImageBuffer::sinkIntoNativeImage(imageBuffer.clone());
     if (!image)
         return false;
-    bufferProxy->setDisplayBuffer(CoordinatedPlatformLayerBufferNativeImage::create(image.releaseNonNull(), nullptr));
+    auto buffer = CoordinatedPlatformLayerBufferNativeImage::create(image.releaseNonNull(), nullptr);
+    buffer->setDisplayNotifier(WTF::move(frameDisplayNotifier));
+    bufferProxy->setDisplayBuffer(WTF::move(buffer));
 #else
     auto threadSafeGrContext = bufferProxy->threadSafeGrContext();
     if (!threadSafeGrContext)
@@ -114,6 +121,7 @@ bool GraphicsLayerAsyncContentsDisplayDelegateCoordinated::tryCopyToLayer(ImageB
         previousImage = std::exchange(m_lastImage, buffer->skiaImage());
     }
     bufferProxy->releaseImageOnCompositingThread(WTF::move(previousImage));
+    buffer->setDisplayNotifier(WTF::move(frameDisplayNotifier));
     bufferProxy->setDisplayBuffer(WTF::move(buffer));
 #endif
 

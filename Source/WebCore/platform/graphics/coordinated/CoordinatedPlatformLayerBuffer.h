@@ -26,6 +26,7 @@
 #pragma once
 
 #if USE(COORDINATED_GRAPHICS)
+#include "GraphicsLayerContentsDisplayDelegate.h"
 #include "IntSize.h"
 #include <wtf/OptionSet.h>
 
@@ -69,6 +70,13 @@ public:
 
     Type type() const { return m_type; }
     const IntSize& size() const LIFETIME_BOUND { return m_size; }
+
+    void setDisplayNotifier(RefPtr<GraphicsLayerFrameDisplayNotifier>&& notifier) { m_displayNotifier = WTF::move(notifier); }
+    void didCommitToCompositor()
+    {
+        if (RefPtr notifier = std::exchange(m_displayNotifier, nullptr))
+            notifier->notify();
+    }
 
 #if USE(TEXTURE_MAPPER)
     OptionSet<TextureMapperFlags> flags() const { return m_flags; }
@@ -148,6 +156,7 @@ protected:
 
     Type m_type;
     IntSize m_size;
+    RefPtr<GraphicsLayerFrameDisplayNotifier> m_displayNotifier;
 #if USE(TEXTURE_MAPPER)
     OptionSet<TextureMapperFlags> m_flags;
     std::unique_ptr<GLFence> m_fence;
