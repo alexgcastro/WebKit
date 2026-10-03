@@ -367,6 +367,23 @@ void ImageBufferSkiaAcceleratedBackend::replayCanvasRecordingContextIfNeeded()
     m_hasActiveRecording = false;
 }
 
+void ImageBufferSkiaAcceleratedBackend::restartCanvasRecording()
+{
+    if (!m_canvasRecordingContext || m_hasActiveRecording)
+        return;
+
+    // Clean up state-replayed saves on the surface canvas before switching away.
+    m_surface->getCanvas()->restoreToCount(1);
+
+    auto* recordingCanvas = m_pictureRecorder.beginRecording(size().width(), size().height());
+    m_switchableCanvas->switchToCanvas(recordingCanvas);
+
+    // Replay state onto the new recording canvas to give it the exact same save/clip/CTM nesting.
+    m_canvasRecordingContext->replayStateOnCanvas(*recordingCanvas);
+    m_canvasRecordingContext->beginRecording(GraphicsContextSkia::RecordingMode::Canvas);
+    m_hasActiveRecording = true;
+}
+
 void ImageBufferSkiaAcceleratedBackend::flushContext()
 {
     replayCanvasRecordingContextIfNeeded();
@@ -411,18 +428,7 @@ void ImageBufferSkiaAcceleratedBackend::prepareForDisplay()
 
     // Re-enable recording mode for subsequent drawing operations.
     // This allows batching to occur again after each prepareForDisplay() cycle.
-    if (m_canvasRecordingContext) {
-        // Clean up state-replayed saves on the surface canvas before switching away.
-        m_surface->getCanvas()->restoreToCount(1);
-
-        auto* recordingCanvas = m_pictureRecorder.beginRecording(size().width(), size().height());
-        m_switchableCanvas->switchToCanvas(recordingCanvas);
-
-        // Replay state onto the new recording canvas to give it the exact same save/clip/CTM nesting.
-        m_canvasRecordingContext->replayStateOnCanvas(*recordingCanvas);
-        m_canvasRecordingContext->beginRecording(GraphicsContextSkia::RecordingMode::Canvas);
-        m_hasActiveRecording = true;
-    }
+    restartCanvasRecording();
 #endif
 }
 
@@ -529,6 +535,8 @@ std::unique_ptr<CoordinatedPlatformLayerBuffer> ImageBufferSkiaAcceleratedBacken
     glDeleteFramebuffers(1, &drawFramebuffer);
     auto readyFence = GLFence::create(display.glDisplay());
     grContext->resetContext(kRenderTarget_GrGLBackendState | kTextureBinding_GrGLBackendState | kView_GrGLBackendState);
+
+    restartCanvasRecording();
 
     const auto& imageInfo = m_surface->imageInfo();
     auto backendFormat = threadSafeGrContext->defaultBackendFormat(kRGBA_8888_SkColorType, GrRenderable::kNo);

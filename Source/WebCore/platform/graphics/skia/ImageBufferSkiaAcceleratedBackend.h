@@ -69,6 +69,7 @@ private:
     GrDirectContext* grContext() const;
     void replayCanvasRecordingContextIfNeeded();
     void ensureCanvasRecordingContext();
+    void restartCanvasRecording();
 
 #if USE(COORDINATED_GRAPHICS)
     RefPtr<GraphicsLayerContentsDisplayDelegate> layerContentsDisplayDelegate() const final;
