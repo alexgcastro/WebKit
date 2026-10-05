@@ -37,7 +37,12 @@
 #include "GLContext.h"
 #include "PlatformDisplay.h"
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkCanvas.h>
 #include <skia/core/SkImage.h>
+#include <skia/core/SkPaint.h>
+#include <skia/core/SkSurface.h>
+#include <skia/gpu/ganesh/GrDirectContext.h>
+#include <skia/gpu/ganesh/SkSurfaceGanesh.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #endif
 
@@ -103,6 +108,21 @@ void CoordinatedPlatformLayerBufferProxy::setDisplayBuffer(std::unique_ptr<Coord
 }
 
 #if USE(SKIA) && !USE(TEXTURE_MAPPER)
+static sk_sp<SkImage> makeRasterCopy(const sk_sp<SkImage>& image, GrDirectContext* grContext)
+{
+    if (auto rasterImage = image->makeRasterImage(grContext))
+        return rasterImage;
+
+    auto alphaType = image->alphaType() == kOpaque_SkAlphaType ? kOpaque_SkAlphaType : kPremul_SkAlphaType;
+    auto surface = SkSurfaces::RenderTarget(grContext, skgpu::Budgeted::kNo, SkImageInfo::Make(image->dimensions(), kRGBA_8888_SkColorType, alphaType, image->refColorSpace()));
+    if (!surface)
+        return nullptr;
+    SkPaint paint;
+    paint.setBlendMode(SkBlendMode::kSrc);
+    surface->getCanvas()->drawImage(image, 0, 0, SkSamplingOptions(), &paint);
+    return surface->makeImageSnapshot()->makeRasterImage(grContext);
+}
+
 RefPtr<NativeImage> CoordinatedPlatformLayerBufferProxy::copyImage(const sk_sp<SkImage>& image)
 {
     assertIsMainThread();
@@ -119,7 +139,7 @@ RefPtr<NativeImage> CoordinatedPlatformLayerBufferProxy::copyImage(const sk_sp<S
         auto& display = PlatformDisplay::sharedDisplay();
         auto* glContext = display.skiaGLContext();
         if (glContext && glContext->makeContextCurrent()) {
-            if (auto rasterImage = image->makeRasterImage(display.skiaGrContext()))
+            if (auto rasterImage = makeRasterCopy(image, display.skiaGrContext()))
                 imageCopy->copy = NativeImage::create(WTF::move(rasterImage));
         }
         imageCopy->semaphore.signal();
