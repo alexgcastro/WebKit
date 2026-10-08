@@ -68,66 +68,42 @@ void SkiaBackingStore::update(const FloatSize& size, float scale, CoordinatedBac
         m_tiles.remove(tileID);
     }
 
+    for (const auto& item : update.tilesToUpdateVisibility()) {
+        auto it = m_tiles.find(item.key);
+        ASSERT(it != m_tiles.end());
+        it->value.setIsVisible(item.value);
+    }
+
     for (const auto& tileUpdate : update.tilesToUpdate()) {
         auto it = m_tiles.find(tileUpdate.tileID);
         ASSERT(it != m_tiles.end());
-        it->value.scheduleUpdate(tileUpdate.dirtyRect, tileUpdate.tileRect, tileUpdate.buffer);
-        m_hasPendingTileUpdates = true;
+        if (tileUpdate.buffer->paintingState() != CoordinatedTileBuffer::PaintingState::Cancelled) {
+            it->value.scheduleUpdate(tileUpdate.dirtyRect, tileUpdate.tileRect, tileUpdate.buffer);
+            m_hasPendingTileUpdates = true;
+        }
     }
 }
 
-void SkiaBackingStore::processPendingTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget)
+bool SkiaBackingStore::processPendingTileUpdates(ProcessHiddenTiles processHiddenTiles, const Function<bool()>& shouldStopProcessingTiles)
 {
     if (!m_hasPendingTileUpdates)
-        return;
+        return false;
 
-    // Replaying a tile's display list is the expensive part of a composite. Tiles near what
-    // was on screen last frame (within nearMargin, a fraction of the viewport) are applied
-    // unconditionally; the others, nearest first, only while tileBudget lasts. Without a
-    // nearMargin nothing is applied unconditionally: that is the pass that runs after a frame
-    // has been presented. A layer never painted yet has no viewport and applies everything.
-    Vector<std::pair<float, Tile*>, 16> deferred;
-    for (auto& tile : m_tiles.values()) {
-        if (!tile.hasPendingUpdates())
-            continue;
-        if (!m_visibleRect) {
-            tile.processPendingUpdateIfNeeded();
-            continue;
-        }
-        auto rect = tile.pendingRect();
-        if (nearMargin) {
-            auto nearRect = *m_visibleRect;
-            nearRect.inflate(std::max(m_visibleRect->width(), m_visibleRect->height()) * *nearMargin);
-            if (nearRect.intersects(rect)) {
-                tile.processPendingUpdateIfNeeded();
-                continue;
-            }
-        }
-        auto distance = std::hypot(rect.center().x() - m_visibleRect->center().x(), rect.center().y() - m_visibleRect->center().y());
-        deferred.append({ distance, &tile });
-    }
-
-    std::sort(deferred.begin(), deferred.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    size_t processed = 0;
-    for (; processed < deferred.size() && tileBudget; ++processed, --tileBudget)
-        deferred[processed].second->processPendingUpdateIfNeeded();
-
-    WPE_TRACE_COUNTER("wpe.tiles.deferred", deferred.size() - processed);
-
+    m_hasPendingTileUpdates = false;
     m_hasPaddedTiles = false;
-    for (auto& tile : m_tiles.values())
+    bool wasStopped = false;
+    unsigned deferredTiles = 0;
+    for (auto& tile : m_tiles.values()) {
+        if (!wasStopped)
+            wasStopped = tile.processPendingUpdateIfNeeded(processHiddenTiles, shouldStopProcessingTiles);
+        bool stillPending = tile.hasPendingUpdates();
+        m_hasPendingTileUpdates |= stillPending;
+        deferredTiles += stillPending;
         m_hasPaddedTiles |= tile.isPadded();
+    }
+    WPE_TRACE_COUNTER("wpe.tiles.deferred", deferredTiles);
 
-    m_hasPendingTileUpdates = processed < deferred.size();
-}
-
-static std::optional<FloatRect> viewportInLayerCoordinates(SkCanvas& canvas)
-{
-    SkMatrix inverse;
-    if (!canvas.getLocalToDeviceAs3x3().invert(&inverse))
-        return std::nullopt;
-    auto size = canvas.getBaseLayerSize();
-    return FloatRect(inverse.mapRect(SkRect::MakeWH(size.width(), size.height())));
+    return wasStopped;
 }
 
 static inline bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect)
@@ -177,7 +153,6 @@ void SkiaBackingStore::paintToCanvas(SkCanvas& canvas, const SkPaint& paint, con
     // are far apart.
 
     FloatRect layerRect = { { }, m_size };
-    m_visibleRect = viewportInLayerCoordinates(canvas);
 
     const auto ctm = canvas.getLocalToDeviceAs3x3();
     const auto sampling = samplingOptionsForMatrix(ctm);
@@ -230,7 +205,6 @@ void SkiaBackingStore::appendImageSetEntries(SkCanvas& canvas, const SkMatrix& c
 
     SkAutoCanvasRestore autoRestore(&canvas, true);
     canvas.concat(ctm);
-    m_visibleRect = viewportInLayerCoordinates(canvas);
 
     const auto localClipBounds = canvas.getLocalClipBounds();
     for (auto& tile : m_tiles.values()) {
@@ -274,20 +248,36 @@ void SkiaBackingStore::Tile::scheduleUpdate(const IntRect& dirtyRect, const IntR
     m_pendingUpdates.append({ tileRect, dirtyRect, Ref { buffer } });
 }
 
-FloatRect SkiaBackingStore::Tile::pendingRect() const
+bool SkiaBackingStore::Tile::processPendingUpdateIfNeeded(ProcessHiddenTiles processHiddenTiles, const Function<bool()>& shouldStopProcessingTiles)
 {
-    if (m_pendingUpdates.isEmpty())
-        return m_rect;
-    FloatRect rect(m_pendingUpdates.last().tileRect);
-    rect.scale(1. / m_scale);
-    return rect;
-}
+    if (!m_isVisible && processHiddenTiles == ProcessHiddenTiles::No)
+        return false;
 
-void SkiaBackingStore::Tile::processPendingUpdateIfNeeded()
-{
-    for (auto& pendingUpdate : m_pendingUpdates)
+    bool wasStopped = false;
+    size_t processedCount = 0;
+    for (auto& pendingUpdate : m_pendingUpdates) {
+        auto paintingState = pendingUpdate.buffer->paintingState();
+        if (paintingState == CoordinatedTileBuffer::PaintingState::Pending || paintingState == CoordinatedTileBuffer::PaintingState::Painting)
+            break;
+
+        if (paintingState == CoordinatedTileBuffer::PaintingState::Cancelled) {
+            processedCount++;
+            continue;
+        }
+
+        if (shouldStopProcessingTiles && shouldStopProcessingTiles()) {
+            wasStopped = true;
+            break;
+        }
+
         update(pendingUpdate.dirtyRect, pendingUpdate.tileRect, pendingUpdate.buffer.get());
-    m_pendingUpdates.clear();
+        processedCount++;
+    }
+
+    if (processedCount)
+        m_pendingUpdates.removeAt(0, processedCount);
+
+    return wasStopped;
 }
 
 void SkiaBackingStore::Tile::ensureTexture(const IntSize& size, CoordinatedTileBuffer& buffer)
@@ -319,7 +309,7 @@ void SkiaBackingStore::Tile::ensureTexture(const IntSize& size, CoordinatedTileB
 
 void SkiaBackingStore::Tile::update(const IntRect& dirtyRect, const IntRect& tileRect, CoordinatedTileBuffer& buffer)
 {
-    WTFBeginSignpost(this, SkiaBackingStoreTileUpdate, "rect %ix%i+%i+%i %s", tileRect.x(), tileRect.y(), tileRect.width(), tileRect.height(), buffer.isBackedByOpenGL() ? "GPUToGPU" : "CPUToGPU");
+    WTFBeginSignpost(this, SkiaBackingStoreTileUpdate, "rect %ix%i+%i+%i %s %s distance %u", tileRect.x(), tileRect.y(), tileRect.width(), tileRect.height(), m_isVisible ? "visible" : "pre-rendered", buffer.isBackedByOpenGL() ? "GPUToGPU" : "CPUToGPU", buffer.distance());
 
     FloatRect unscaledTileRect(tileRect);
     unscaledTileRect.scale(1. / m_scale);
@@ -350,8 +340,11 @@ void SkiaBackingStore::Tile::update(const IntRect& dirtyRect, const IntRect& til
         }
     } else {
         auto& unacceleratedBuffer = static_cast<CoordinatedUnacceleratedTileBuffer&>(buffer);
-        ensureTexture(tileRect.size(), buffer);
-        m_texture->updateContents(unacceleratedBuffer.data(), dirtyRect, { }, unacceleratedBuffer.stride(), buffer.pixelFormat());
+        auto data = unacceleratedBuffer.takeData();
+        if (!data.isEmpty()) {
+            ensureTexture(tileRect.size(), buffer);
+            m_texture->updateContents(data.span().data(), dirtyRect, { }, unacceleratedBuffer.stride(), buffer.pixelFormat());
+        }
     }
 
     WTFEndSignpost(this, SkiaBackingStoreTileUpdate);
@@ -408,6 +401,11 @@ bool SkiaBackingStore::Tile::isPadded() const
 {
     // A surface snapshot is sized to the tile, so only a texture can be padded.
     return m_texture && m_texture->size() != m_texture->allocatedSize();
+}
+
+bool SkiaBackingStore::Tile::hasPendingUpdates() const
+{
+    return !m_pendingUpdates.isEmpty();
 }
 
 } // namespace WebCore

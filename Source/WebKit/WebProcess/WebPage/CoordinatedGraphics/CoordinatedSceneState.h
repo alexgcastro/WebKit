@@ -55,13 +55,7 @@ public:
 
     bool flush();
     void flushPendingState();
-    // Returns true when tile updates were held back for a later frame, which then has to be
-    // scheduled for them to be applied.
     bool flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
-    // Applies some of the tile updates held back by flushCompositingState(), to be called once
-    // the frame has been handed over. Returns true if some are still pending.
-    bool rasterizeDeferredTiles();
-    static bool rasterizesTilesAfterFrame();
     void invalidate();
 
     void invalidateCommittedLayers();
@@ -72,6 +66,8 @@ public:
 
     void willPaintTile();
     void didPaintTile();
+    bool didPaintPreRenderedTile(WebCore::CoordinatedPlatformLayer&);
+    bool processLayersWithPreRenderedTiles(const Function<bool()>& shouldStopProcessingTiles);
     unsigned pendingTiles() const { return m_pendingTiles.load(); }
 
 private:
@@ -88,6 +84,8 @@ private:
     HashSet<Ref<WebCore::CoordinatedPlatformLayer>> m_pendingLayersToRemove WTF_GUARDED_BY_LOCK(m_pendingLayersLock);
     std::atomic<bool> m_didChangeLayers { false };
     HashSet<Ref<WebCore::CoordinatedPlatformLayer>> m_committedLayers;
+    Lock m_layersWithPreRenderedTilesLock;
+    HashSet<Ref<WebCore::CoordinatedPlatformLayer>> m_layersWithPreRenderedTiles WTF_GUARDED_BY_LOCK(m_layersWithPreRenderedTilesLock);
     std::atomic<unsigned> m_pendingTiles { 0 };
     Lock m_stateLock;
 };

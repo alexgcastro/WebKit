@@ -53,6 +53,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #endif
 #endif
 
+#if USE(CAIRO)
+#include <cairo.h>
+#endif
+
 namespace WebCore {
 
 Lock CoordinatedTileBuffer::s_layersMemoryUsageLock;
@@ -74,93 +78,197 @@ double CoordinatedTileBuffer::getMemoryUsage()
     return memoryUsage;
 }
 
-void CoordinatedTileBuffer::beginPainting()
+CoordinatedTileBuffer::PaintingState CoordinatedTileBuffer::paintingState() const
 {
     Locker locker { m_painting.lock };
-    ASSERT(m_painting.state == PaintingState::Complete);
-    m_painting.state = PaintingState::InProgress;
+    return m_painting.state;
 }
 
-void CoordinatedTileBuffer::completePainting()
+bool CoordinatedTileBuffer::beginPainting()
 {
     Locker locker { m_painting.lock };
-    ASSERT(m_painting.state == PaintingState::InProgress);
+    if (m_painting.state == PaintingState::Cancelled)
+        return false;
+
+    ASSERT(m_painting.state == PaintingState::Pending);
+    m_painting.state = PaintingState::Painting;
+    return true;
+}
+
+bool CoordinatedTileBuffer::completePainting()
+{
+    Locker locker { m_painting.lock };
+    ASSERT(m_painting.state == PaintingState::Painting);
     m_painting.state = PaintingState::Complete;
-    m_painting.condition.notifyOne();
+    m_painting.condition.notifyAll();
 
 #if USE(SKIA)
     // Surface is no longer needed, destroy it (in the same thread that created it).
     m_surface = nullptr;
 #endif
+
+    return !!std::exchange(m_painting.renderingUpdateID, std::nullopt);
 }
 
-void CoordinatedTileBuffer::waitUntilPaintingComplete()
+CoordinatedTileBuffer::UpdateDistanceResult CoordinatedTileBuffer::updateDistance(unsigned distance, uint64_t renderingUpdateID)
+{
+    Locker locker { m_painting.lock };
+    m_painting.distance = distance;
+
+    if (m_painting.state == PaintingState::Complete || m_painting.state == PaintingState::Cancelled)
+        return UpdateDistanceResult::NoChange;
+
+    bool didHaveRenderingUpdateID = m_painting.renderingUpdateID.has_value();
+
+    if (distance) {
+        // Passed renderingUpdateID is ignored for hidden tiles.
+        m_painting.renderingUpdateID = std::nullopt;
+        return didHaveRenderingUpdateID ? UpdateDistanceResult::BecameHidden : UpdateDistanceResult::NoChange;
+    }
+
+    m_painting.renderingUpdateID = renderingUpdateID;
+    return !didHaveRenderingUpdateID ? UpdateDistanceResult::BecameVisible : UpdateDistanceResult::NoChange;
+}
+
+void CoordinatedTileBuffer::cancelPainting()
+{
+    Locker locker { m_painting.lock };
+    if (m_painting.state != PaintingState::Pending)
+        return;
+
+    m_painting.state = PaintingState::Cancelled;
+    m_painting.condition.notifyAll();
+}
+
+bool CoordinatedTileBuffer::cancelPaintingOrResetRenderingUpdate()
+{
+    Locker locker { m_painting.lock };
+    switch (m_painting.state) {
+    case PaintingState::Pending:
+        m_painting.state = PaintingState::Cancelled;
+        m_painting.condition.notifyAll();
+        return !!std::exchange(m_painting.renderingUpdateID, std::nullopt);
+    case PaintingState::Painting: {
+        bool didHaveRenderingUpdateID = m_painting.renderingUpdateID.has_value();
+        m_painting.renderingUpdateID = std::nullopt;
+        return didHaveRenderingUpdateID;
+    }
+    case PaintingState::Complete:
+    case PaintingState::Cancelled:
+        break;
+    }
+
+    return false;
+}
+
+unsigned CoordinatedTileBuffer::distance()
+{
+    Locker locker { m_painting.lock };
+    return m_painting.distance;
+}
+
+void CoordinatedTileBuffer::waitUntilPaintingFinished()
 {
     Locker locker { m_painting.lock };
     m_painting.condition.wait(m_painting.lock, [this] {
-        return m_painting.state == PaintingState::Complete;
+        assertIsHeld(m_painting.lock);
+        return m_painting.state == PaintingState::Complete || m_painting.state == PaintingState::Cancelled;
     });
 }
 
-Ref<CoordinatedTileBuffer> CoordinatedUnacceleratedTileBuffer::create(const IntSize& size, Flags flags)
+Ref<CoordinatedTileBuffer> CoordinatedUnacceleratedTileBuffer::create(const IntSize& size, Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
 {
-    return adoptRef(*new CoordinatedUnacceleratedTileBuffer(size, flags));
+    return adoptRef(*new CoordinatedUnacceleratedTileBuffer(size, flags, distance, renderingUpdateID));
 }
 
-CoordinatedUnacceleratedTileBuffer::CoordinatedUnacceleratedTileBuffer(const IntSize& size, Flags flags)
-    : CoordinatedTileBuffer(flags)
+CoordinatedUnacceleratedTileBuffer::CoordinatedUnacceleratedTileBuffer(const IntSize& size, Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
+    : CoordinatedTileBuffer(flags, distance, renderingUpdateID)
     , m_size(size)
 {
-    const auto checkedArea = size.area() * 4;
-    m_data = MallocSpan<unsigned char>::tryZeroedMalloc(checkedArea);
+}
+
+CoordinatedUnacceleratedTileBuffer::~CoordinatedUnacceleratedTileBuffer()
+{
+    if (m_data.isEmpty())
+        return;
+
+    Locker locker { s_layersMemoryUsageLock };
+    s_currentLayersMemoryUsage -= m_data.size();
+}
+
+#if USE(CAIRO)
+RefPtr<cairo_surface_t> CoordinatedUnacceleratedTileBuffer::createSurface()
+{
+    const auto checkedArea = m_size.area() * 4;
+    if (checkedArea.hasOverflowed() || !m_data.tryReserveCapacity(checkedArea.value()))
+        return nullptr;
+
+    m_data.grow(checkedArea.value());
 
     {
         Locker locker { s_layersMemoryUsageLock };
         s_currentLayersMemoryUsage += checkedArea;
         s_maxLayersMemoryUsage = std::max(s_maxLayersMemoryUsage, s_currentLayersMemoryUsage);
     }
-}
 
-CoordinatedUnacceleratedTileBuffer::~CoordinatedUnacceleratedTileBuffer()
-{
-    const auto checkedArea = m_size.area().value() * 4;
-    {
-        Locker locker { s_layersMemoryUsageLock };
-        s_currentLayersMemoryUsage -= checkedArea;
-    }
+    return adoptRef(cairo_image_surface_create_for_data(m_data.mutableSpan().data(), CAIRO_FORMAT_ARGB32, m_size.width(), m_size.height(), m_size.width() * 4));
 }
+#endif
 
 #if USE(SKIA)
 SkCanvas* CoordinatedUnacceleratedTileBuffer::canvas()
 {
     if (!m_surface) {
+        const auto checkedArea = m_size.area() * 4;
+        if (checkedArea.hasOverflowed() || !m_data.tryReserveCapacity(checkedArea.value()))
+            return nullptr;
+
+        m_data.grow(checkedArea.value());
+
+        {
+            Locker locker { s_layersMemoryUsageLock };
+            s_currentLayersMemoryUsage += checkedArea;
+            s_maxLayersMemoryUsage = std::max(s_maxLayersMemoryUsage, s_currentLayersMemoryUsage);
+        }
+
         auto alphaType = supportsAlpha() ? kPremul_SkAlphaType : kOpaque_SkAlphaType;
         auto imageInfo = SkImageInfo::Make(m_size.width(), m_size.height(), kBGRA_8888_SkColorType, alphaType, SkColorSpace::MakeSRGB());
-        // FIXME: ref buffer and unref on release proc?
         auto properties = FontRenderOptions::singleton().createSurfaceProps();
-        m_surface = SkSurfaces::WrapPixels(imageInfo, data(), imageInfo.minRowBytes64(), &properties);
+        m_surface = SkSurfaces::WrapPixels(imageInfo, m_data.mutableSpan().data(), imageInfo.minRowBytes64(), &properties);
     }
     return m_surface->getCanvas();
 }
 #endif
 
-#if USE(SKIA)
-#if USE(TEXTURE_MAPPER)
-Ref<CoordinatedTileBuffer> CoordinatedAcceleratedTileBuffer::create(Ref<BitmapTexture>&& texture)
+Vector<unsigned char> CoordinatedUnacceleratedTileBuffer::takeData()
 {
-    auto flags = CoordinatedTileBuffer::Flags { texture->isOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha };
-    return adoptRef(*new CoordinatedAcceleratedTileBuffer(WTF::move(texture), flags));
+    auto data = WTF::move(m_data);
+
+    {
+        Locker locker { s_layersMemoryUsageLock };
+        s_currentLayersMemoryUsage -= data.size();
+    }
+
+    return data;
 }
 
-CoordinatedAcceleratedTileBuffer::CoordinatedAcceleratedTileBuffer(Ref<BitmapTexture>&& texture, Flags flags)
-    : CoordinatedTileBuffer(flags)
+#if USE(SKIA)
+#if USE(TEXTURE_MAPPER)
+Ref<CoordinatedTileBuffer> CoordinatedAcceleratedTileBuffer::create(Ref<BitmapTexture>&& texture, unsigned distance, std::optional<uint64_t> renderingUpdateID)
+{
+    auto flags = CoordinatedTileBuffer::Flags { texture->isOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha };
+    return adoptRef(*new CoordinatedAcceleratedTileBuffer(WTF::move(texture), flags, distance, renderingUpdateID));
+}
+
+CoordinatedAcceleratedTileBuffer::CoordinatedAcceleratedTileBuffer(Ref<BitmapTexture>&& texture, Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
+    : CoordinatedTileBuffer(flags, distance, renderingUpdateID)
     , m_texture(WTF::move(texture))
 {
 }
 
 #else
 
-Ref<CoordinatedTileBuffer> CoordinatedAcceleratedTileBuffer::create(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext, const IntSize& size, Flags flags)
+Ref<CoordinatedTileBuffer> CoordinatedAcceleratedTileBuffer::create(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext, const IntSize& size, Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
 {
     auto alphaType = (flags & SupportsAlpha) ? kPremul_SkAlphaType : kOpaque_SkAlphaType;
     auto imageInfo = SkImageInfo::Make(size.width(), size.height(), kRGBA_8888_SkColorType, alphaType, SkColorSpace::MakeSRGB());
@@ -169,11 +277,11 @@ Ref<CoordinatedTileBuffer> CoordinatedAcceleratedTileBuffer::create(const sk_sp<
     auto properties = FontRenderOptions::singleton().createSurfaceProps();
     auto maxResourceCacheBytes = PlatformDisplay::sharedDisplay().maxSkiaResourceCacheBytes();
     auto characterization = threadSafeGrContext->createCharacterization(maxResourceCacheBytes, imageInfo, backendFormat, 0, kTopLeft_GrSurfaceOrigin, properties, skgpu::Mipmapped::kNo);
-    return adoptRef(*new CoordinatedAcceleratedTileBuffer(WTF::move(characterization), flags));
+    return adoptRef(*new CoordinatedAcceleratedTileBuffer(WTF::move(characterization), flags, distance, renderingUpdateID));
 }
 
-CoordinatedAcceleratedTileBuffer::CoordinatedAcceleratedTileBuffer(GrSurfaceCharacterization&& characterization, Flags flags)
-    : CoordinatedTileBuffer(flags)
+CoordinatedAcceleratedTileBuffer::CoordinatedAcceleratedTileBuffer(GrSurfaceCharacterization&& characterization, Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
+    : CoordinatedTileBuffer(flags, distance, renderingUpdateID)
     , m_characterization(WTF::move(characterization))
 {
 }
@@ -207,16 +315,14 @@ SkCanvas* CoordinatedAcceleratedTileBuffer::canvas()
 #endif
 }
 
-void CoordinatedAcceleratedTileBuffer::completePainting()
+bool CoordinatedAcceleratedTileBuffer::completePainting()
 {
 #if USE(TEXTURE_MAPPER)
     if (m_surface) {
         auto* recordingContext = m_surface->recordingContext();
         auto* grContext = recordingContext ? recordingContext->asDirectContext() : nullptr;
-        if (!grContext) {
-            CoordinatedTileBuffer::completePainting();
-            return;
-        }
+        if (!grContext)
+            return CoordinatedTileBuffer::completePainting();
 
         m_fence = SkiaUtilities::flushAndSubmitSurfaceWithFence(grContext, m_surface.get());
     }
@@ -225,7 +331,7 @@ void CoordinatedAcceleratedTileBuffer::completePainting()
         m_displayList = m_recorder->detach();
 #endif
 
-    CoordinatedTileBuffer::completePainting();
+    return CoordinatedTileBuffer::completePainting();
 }
 
 #if USE(TEXTURE_MAPPER)
@@ -240,9 +346,11 @@ void CoordinatedAcceleratedTileBuffer::serverWait()
 #endif
 #endif // USE(SKIA)
 
-CoordinatedTileBuffer::CoordinatedTileBuffer(Flags flags)
+CoordinatedTileBuffer::CoordinatedTileBuffer(Flags flags, unsigned distance, std::optional<uint64_t> renderingUpdateID)
     : m_flags(flags)
 {
+    m_painting.distance = distance;
+    m_painting.renderingUpdateID = renderingUpdateID;
 }
 
 CoordinatedTileBuffer::~CoordinatedTileBuffer() = default;

@@ -38,6 +38,7 @@
 #include "WebProcess.h"
 #include <WebCore/AsyncScrollingCoordinator.h>
 #include <WebCore/Chrome.h>
+#include <WebCore/CoordinatedTileManager.h>
 #include <WebCore/Damage.h>
 #include <WebCore/GraphicsLayerCoordinated.h>
 #include <WebCore/LocalFrame.h>
@@ -110,9 +111,9 @@ LayerTreeHost::LayerTreeHost(WebPage& webPage)
 
     lazyInitialize(m_compositor, ThreadedCompositor::create(webPage, *this, m_sceneState.get()));
 #if USE(TEXTURE_MAPPER)
-    m_skiaPaintingEngine = SkiaPaintingEngine::create(nullptr);
+    m_tileManager = CoordinatedTileManager::create(nullptr);
 #else
-    m_skiaPaintingEngine = SkiaPaintingEngine::create(m_compositor->threadSafeGrContext());
+    m_tileManager = CoordinatedTileManager::create(m_compositor->threadSafeGrContext());
 #endif
 
 #if ENABLE(DAMAGE_TRACKING)
@@ -131,7 +132,7 @@ LayerTreeHost::LayerTreeHost(WebPage& webPage)
 
 LayerTreeHost::~LayerTreeHost()
 {
-    m_skiaPaintingEngine = nullptr;
+    m_tileManager = nullptr;
 
     // ThreadedCompositor must be invalidated before invalidating CoordinatedSceneState
     // to invalidate pending layers in the compositor thread.
@@ -184,6 +185,10 @@ void LayerTreeHost::updateRendering()
 
     TraceScope traceScope(LayerTreeHostRenderingUpdateStart, LayerTreeHostRenderingUpdateEnd);
 
+    m_renderingUpdateID++;
+
+    m_tileManager->didStartRenderingUpdate(m_renderingUpdateID);
+
     Ref page = m_webPage;
     page->updateRendering();
     page->flushPendingEditorStateUpdate();
@@ -219,6 +224,7 @@ void LayerTreeHost::updateRendering()
         drawingArea->dispatchPendingCallbacksAfterEnsuringDrawing();
 
     bool didChangeSceneState = m_sceneState->flush();
+    m_tileManager->didFinishRenderingUpdate();
     if (m_compositionRequired || m_pendingResize || m_forceFrameSync || didChangeSceneState)
         requestCompositionForRenderingUpdate();
 
@@ -408,6 +414,12 @@ void LayerTreeHost::didPaintTile()
 {
     m_sceneState->didPaintTile();
     m_compositor->pendingTilesDidChange();
+}
+
+void LayerTreeHost::didPaintPreRenderedTile(CoordinatedPlatformLayer& layer)
+{
+    if (m_sceneState->didPaintPreRenderedTile(layer))
+        m_compositor->preRenderedTilesDidChange();
 }
 
 Ref<CoordinatedImageBackingStore> LayerTreeHost::imageBackingStore(Ref<NativeImage>&& nativeImage)

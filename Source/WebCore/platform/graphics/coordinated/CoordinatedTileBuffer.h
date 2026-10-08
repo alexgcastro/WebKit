@@ -35,9 +35,9 @@
 #include "PixelFormat.h"
 #include <wtf/Condition.h>
 #include <wtf/Lock.h>
-#include <wtf/MallocSpan.h>
 #include <wtf/Ref.h>
 #include <wtf/ThreadSafeRefCounted.h>
+#include <wtf/Vector.h>
 
 #if USE(SKIA)
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -47,6 +47,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/private/chromium/GrDeferredDisplayListRecorder.h>
 #include <skia/private/chromium/GrSurfaceCharacterization.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#endif
+
+#if USE(CAIRO)
+#include "RefPtrCairo.h"
 #endif
 
 namespace WebCore {
@@ -69,9 +73,28 @@ public:
 
     bool supportsAlpha() const { return m_flags & SupportsAlpha; }
 
-    virtual void beginPainting();
-    virtual void completePainting();
-    void waitUntilPaintingComplete();
+    enum class PaintingState {
+        Pending,
+        Painting,
+        Complete,
+        Cancelled
+    };
+
+    PaintingState paintingState() const;
+
+    virtual bool beginPainting();
+    virtual bool completePainting();
+    void cancelPainting();
+    bool cancelPaintingOrResetRenderingUpdate();
+    unsigned distance();
+    void waitUntilPaintingFinished();
+
+    enum class UpdateDistanceResult {
+        NoChange,
+        BecameVisible,
+        BecameHidden
+    };
+    UpdateDistanceResult updateDistance(unsigned distance, uint64_t renderingUpdateID);
 
 #if USE(SKIA)
     virtual SkCanvas* canvas() = 0;
@@ -81,7 +104,7 @@ public:
     static double getMemoryUsage();
 
 protected:
-    explicit CoordinatedTileBuffer(Flags);
+    CoordinatedTileBuffer(Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 
 #if USE(SKIA)
     sk_sp<SkSurface> m_surface;
@@ -91,15 +114,12 @@ protected:
     static double s_currentLayersMemoryUsage;
     static double s_maxLayersMemoryUsage;
 
-    enum class PaintingState {
-        InProgress,
-        Complete
-    };
-
     struct {
-        Lock lock;
+        mutable Lock lock;
         Condition condition;
-        PaintingState state { PaintingState::Complete };
+        PaintingState state WTF_GUARDED_BY_LOCK(lock) { PaintingState::Pending };
+        std::optional<uint64_t> renderingUpdateID WTF_GUARDED_BY_LOCK(lock);
+        unsigned distance WTF_GUARDED_BY_LOCK(lock) { 0 };
     } m_painting;
 
 private:
@@ -108,16 +128,19 @@ private:
 
 class CoordinatedUnacceleratedTileBuffer final : public CoordinatedTileBuffer {
 public:
-    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(const IntSize&, Flags);
+    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(const IntSize&, Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
     WEBCORE_EXPORT virtual ~CoordinatedUnacceleratedTileBuffer();
 
     int stride() const { return m_size.width() * 4; }
 
-    const unsigned char* data() const { return m_data.span().data(); }
-    unsigned char* data() { return m_data.mutableSpan().data(); }
+#if USE(CAIRO)
+    RefPtr<cairo_surface_t> createSurface();
+#endif
+
+    Vector<unsigned char> takeData();
 
 private:
-    CoordinatedUnacceleratedTileBuffer(const IntSize&, Flags);
+    CoordinatedUnacceleratedTileBuffer(const IntSize&, Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 
     bool isBackedByOpenGL() const final { return false; }
     IntSize size() const final { return m_size; }
@@ -127,28 +150,17 @@ private:
     SkCanvas* canvas() final;
 #endif
 
-    MallocSpan<unsigned char> m_data;
+    Vector<unsigned char> m_data;
     IntSize m_size;
-
-    enum class PaintingState {
-        InProgress,
-        Complete
-    };
-
-    struct {
-        Lock lock;
-        Condition condition;
-        PaintingState state { PaintingState::Complete };
-    } m_painting;
 };
 
 #if USE(SKIA)
 class CoordinatedAcceleratedTileBuffer final : public CoordinatedTileBuffer {
 public:
 #if USE(TEXTURE_MAPPER)
-    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(Ref<BitmapTexture>&&);
+    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(Ref<BitmapTexture>&&, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 #else
-    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(const sk_sp<GrContextThreadSafeProxy>&, const IntSize&, Flags);
+    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(const sk_sp<GrContextThreadSafeProxy>&, const IntSize&, Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 #endif
     WEBCORE_EXPORT virtual ~CoordinatedAcceleratedTileBuffer();
 
@@ -161,9 +173,9 @@ public:
 
 private:
 #if USE(TEXTURE_MAPPER)
-    CoordinatedAcceleratedTileBuffer(Ref<BitmapTexture>&&, Flags);
+    CoordinatedAcceleratedTileBuffer(Ref<BitmapTexture>&&, Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 #else
-    CoordinatedAcceleratedTileBuffer(GrSurfaceCharacterization&&, Flags);
+    CoordinatedAcceleratedTileBuffer(GrSurfaceCharacterization&&, Flags, unsigned distance, std::optional<uint64_t> renderingUpdateID);
 #endif
 
     bool isBackedByOpenGL() const final { return true; }
@@ -171,7 +183,7 @@ private:
     PixelFormat pixelFormat() const final { return PixelFormat::RGBA8; }
 
     SkCanvas* canvas() final;
-    void completePainting() final;
+    bool completePainting() final;
 
 #if USE(TEXTURE_MAPPER)
     const Ref<BitmapTexture> m_texture;

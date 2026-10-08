@@ -55,6 +55,7 @@ class CoordinatedImageBackingStore;
 class CoordinatedPlatformLayer;
 class CoordinatedPlatformLayerBuffer;
 class CoordinatedTileBuffer;
+class CoordinatedTileManager;
 class GraphicsLayerCoordinated;
 class NativeImage;
 
@@ -64,15 +65,6 @@ class TextureMapperLayer;
 class SkiaCompositingLayer;
 #endif
 
-#if USE(SKIA)
-class SkiaPaintingEngine;
-#endif
-#if USE(CAIRO)
-namespace Cairo {
-class PaintingEngine;
-}
-#endif
-
 class CoordinatedPlatformLayer : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<CoordinatedPlatformLayer> {
 public:
     // FIXME: remove this client when a subclass is added for the WebProcess.
@@ -80,11 +72,7 @@ public:
     public:
         virtual void attachLayer(CoordinatedPlatformLayer&) = 0;
         virtual void detachLayer(CoordinatedPlatformLayer&) = 0;
-#if USE(CAIRO)
-        virtual Cairo::PaintingEngine& paintingEngine() = 0;
-#elif USE(SKIA)
-        virtual SkiaPaintingEngine& paintingEngine() const = 0;
-#endif
+        virtual CoordinatedTileManager& tileManager() const = 0;
         virtual Ref<CoordinatedImageBackingStore> imageBackingStore(Ref<NativeImage>&&) = 0;
         virtual void notifyCompositionRequired() = 0;
         virtual bool isCompositionRequiredOrOngoing() const = 0;
@@ -93,6 +81,7 @@ public:
         virtual int maxTextureSize() const = 0;
         virtual void willPaintTile() = 0;
         virtual void didPaintTile() = 0;
+        virtual void didPaintPreRenderedTile(CoordinatedPlatformLayer&) = 0;
     };
 
     static Ref<CoordinatedPlatformLayer> create();
@@ -219,9 +208,8 @@ public:
 
     bool hasPendingTilesCreation() const { assertIsMainThread(); return m_pendingTilesCreation; }
     bool hasPendingBackingStoreTileUpdates() const;
-    // Tiles within nearMargin of the viewport are always applied, at most tileBudget of the
-    // others; both are only honoured by the Skia compositor, which otherwise applies everything.
-    void processPendingBackingStoreTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget);
+    void processPendingBackingStoreTileUpdates();
+    bool processPendingBackingStoreTileUpdatesIncludingPreRendered(const Function<bool()>& shouldStopProcessingTiles);
     bool isCompositionRequiredOrOngoing() const;
     void requestComposition(CompositionReason);
     // Asks for a frame even though no layer changed yet: resampled scroll input is only
@@ -232,6 +220,7 @@ public:
 
     void willPaintTile();
     void didPaintTile();
+    void didPaintPreRenderedTile();
     void waitUntilPaintingComplete();
 
 private:

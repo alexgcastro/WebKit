@@ -111,6 +111,9 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
 {
     ASSERT(RunLoop::isMain());
 
+    // Make sure rendering update is the highest priority task in worker loop.
+    m_renderTimer.setPriority(RunLoopSourcePriority::RunLoopTimer - 1);
+
     lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
         this->didCompositeRunLoopObserverFired();
     }));
@@ -310,6 +313,38 @@ void ThreadedCompositor::pendingTilesDidChange()
     scheduleUpdateLocked();
 }
 
+void ThreadedCompositor::preRenderedTilesDidChange()
+{
+    m_workQueue->dispatch([this, protectedThis = Ref { *this }] {
+        {
+            Locker locker { m_state.lock };
+            if (m_state.state == State::Invalidated)
+                return;
+        }
+
+#if USE(TEXTURE_MAPPER)
+        if (!m_context || !m_context->makeContextCurrent())
+            return;
+#endif
+
+        WPE_TRACE_SCOPE("composite: pre-rendered tiles");
+        // Keep processing pending tile updates for at most 2ms while no other composition is requested.
+        auto deadline = MonotonicTime::now() + 2_ms;
+        Function<bool()> shouldStopProcessingTiles = [&] -> bool {
+            if (MonotonicTime::now() >= deadline)
+                return true;
+
+            Locker locker { m_state.lock };
+            return m_state.isRenderTimerActive;
+        };
+
+        bool hasPendingPreRenderedTiles = m_sceneState->processLayersWithPreRenderedTiles(shouldStopProcessingTiles);
+        PlatformDisplay::sharedDisplay().skiaGrContext()->flushAndSubmit(GrSyncCpu::kNo);
+        if (hasPendingPreRenderedTiles)
+            preRenderedTilesDidChange();
+    });
+}
+
 void ThreadedCompositor::setSize(const IntSize& size, float deviceScaleFactor)
 {
     ASSERT(RunLoop::isMain());
@@ -371,8 +406,8 @@ void ThreadedCompositor::flushCompositingState(const OptionSet<CompositionReason
     }
 #endif
 
-    // Tiles held back to keep this frame on time are applied once it has been handed over.
-    m_hasDeferredTileUpdates = m_sceneState->flushCompositingState(reasons);
+    if (m_sceneState->flushCompositingState(reasons))
+        preRenderedTilesDidChange();
 }
 
 TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
@@ -697,28 +732,6 @@ void ThreadedCompositor::renderLayerTree()
             m_layerTreeHost->didRenderFrame();
     });
 
-    if (std::exchange(m_hasDeferredTileUpdates, false))
-        rasterizeDeferredTiles();
-}
-
-void ThreadedCompositor::rasterizeDeferredTiles()
-{
-    // The frame is with SurfaceFlinger now and the next one is at least a display refresh away,
-    // which is time the compositor would otherwise spend idle. Tiles rasterized here are ready
-    // before scrolling brings them into view, and never make a presented frame late.
-    bool stillPending;
-    {
-        WPE_TRACE_SCOPE("composite: post-frame tile raster");
-        stillPending = m_sceneState->rasterizeDeferredTiles();
-#if USE(SKIA) && !USE(TEXTURE_MAPPER)
-        if (auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext())
-            grContext->flushAndSubmit(GrSyncCpu::kNo);
-#endif
-    }
-    // Without the post-frame pass (debug.wpe.tiles.postframe=0) nothing was applied, and the
-    // held-back tiles simply wait for the next frame.
-    if (stillPending || !CoordinatedSceneState::rasterizesTilesAfterFrame())
-        requestComposition(CompositionReason::AsyncScrolling);
 }
 
 void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&& didCompositeFunction)

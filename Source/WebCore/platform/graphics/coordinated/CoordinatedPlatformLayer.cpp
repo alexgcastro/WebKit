@@ -34,6 +34,7 @@
 #include "CoordinatedPlatformLayerBufferHolePunch.h"
 #include "CoordinatedPlatformLayerBufferVideo.h"
 #include "CoordinatedTileBuffer.h"
+#include "CoordinatedTileManager.h"
 #include "GraphicsContext.h"
 #include "GraphicsLayerCoordinated.h"
 #include "NativeImage.h"
@@ -47,7 +48,6 @@
 
 #if USE(SKIA)
 #include "SkiaCompositingLayer.h"
-#include "SkiaPaintingEngine.h"
 #endif
 
 namespace WebCore {
@@ -66,7 +66,7 @@ CoordinatedPlatformLayer::CoordinatedPlatformLayer(Client* client)
     : m_client(client)
     , m_id(PlatformLayerIdentifier::generate())
 #if !USE(TEXTURE_MAPPER)
-    , m_threadSafeGrContext(m_client ? m_client->paintingEngine().threadSafeGrContext() : nullptr)
+    , m_threadSafeGrContext(m_client ? m_client->tileManager().threadSafeGrContext() : nullptr)
 #endif
 {
     ASSERT(isMainThread());
@@ -968,7 +968,7 @@ void CoordinatedPlatformLayer::updateContents(bool affectedByTransformAnimation)
         }
     } else {
         if (m_backingStoreProxy) {
-            m_backingStoreProxy->invalidate();
+            m_backingStoreProxy->invalidate(*this);
             m_backingStoreProxy = nullptr;
             m_pendingChanges.add(Change::BackingStore);
         }
@@ -982,10 +982,13 @@ void CoordinatedPlatformLayer::updateContents(bool affectedByTransformAnimation)
 
 void CoordinatedPlatformLayer::purgeBackingStores()
 {
+    assertIsMainThread();
+
     Locker locker { m_lock };
     if (m_backingStoreProxy) {
-        m_backingStoreProxy->invalidate();
+        m_backingStoreProxy->invalidate(*this);
         m_backingStoreProxy = nullptr;
+        m_pendingChanges.add(Change::BackingStore);
     }
     m_imageBackingStore.current = nullptr;
     if (shouldReleaseBuffer(m_contentsBuffer.pending.get()))
@@ -1033,6 +1036,13 @@ void CoordinatedPlatformLayer::didPaintTile()
     // Could be called from painting threads.
     if (m_client)
         m_client->didPaintTile();
+}
+
+void CoordinatedPlatformLayer::didPaintPreRenderedTile()
+{
+    // Called from painting threads.
+    if (m_client)
+        m_client->didPaintPreRenderedTile(*this);
 }
 
 void CoordinatedPlatformLayer::waitUntilPaintingComplete()
@@ -1565,21 +1575,33 @@ bool CoordinatedPlatformLayer::hasPendingBackingStoreTileUpdates() const
     return false;
 }
 
-void CoordinatedPlatformLayer::processPendingBackingStoreTileUpdates(std::optional<float> nearMargin, unsigned& tileBudget)
+void CoordinatedPlatformLayer::processPendingBackingStoreTileUpdates()
 {
     ASSERT(!isMainThread());
 
 #if USE(TEXTURE_MAPPER)
-    UNUSED_PARAM(nearMargin);
-    UNUSED_PARAM(tileBudget);
     Locker locker { m_lock };
     if (m_backingStore)
         m_backingStore->processPendingUpdates();
 #else
     if (m_target) {
-        m_target->processPendingTileUpdates(nearMargin, tileBudget);
+        m_target->processPendingTileUpdates();
         return;
     }
+#endif
+}
+
+bool CoordinatedPlatformLayer::processPendingBackingStoreTileUpdatesIncludingPreRendered(const Function<bool()>& shouldStopProcessingTiles)
+{
+    ASSERT(!isMainThread());
+
+#if USE(TEXTURE_MAPPER)
+    // FIXME:
+    Locker locker { m_lock };
+    if (m_backingStore)
+        m_backingStore->processPendingUpdates();
+#else
+    return m_target ? m_target->processPendingTileUpdatesIncludingPreRendered(shouldStopProcessingTiles) : false;
 #endif
 }
 

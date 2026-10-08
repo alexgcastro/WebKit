@@ -83,7 +83,7 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
 
         WTFBeginSignpost(this, CoordinatedSwapBuffer, "%u/%zu, rect %ix%i+%i+%i", updateIndex + 1, updatesCount, update.tileRect.x(), update.tileRect.y(), update.tileRect.width(), update.tileRect.height());
 
-        update.buffer->waitUntilPaintingComplete();
+        update.buffer->waitUntilPaintingFinished();
 
         FloatRect unscaledTileRect(update.tileRect);
         unscaledTileRect.scale(1. / m_scale);
@@ -118,13 +118,15 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
         }
 #endif
         auto& buffer = static_cast<CoordinatedUnacceleratedTileBuffer&>(update.buffer.get());
-        ensureTexture(update.tileRect.size(), buffer);
+        auto data = unacceleratedBuffer.takeData();
+        if (!data.isEmpty()) {
+            ensureTexture(update.tileRect.size(), buffer);
 
-        WTFBeginSignpost(this, CopyTextureCPUToGPU);
-        ASSERT(!update.buffer->isBackedByOpenGL());
-        m_texture->updateContents(buffer.data(), update.sourceRect, update.bufferOffset, buffer.stride(), update.buffer->pixelFormat());
-        WTFEndSignpost(this, CopyTextureCPUToGPU);
-
+            WTFBeginSignpost(this, CopyTextureCPUToGPU);
+            ASSERT(!update.buffer->isBackedByOpenGL());
+            m_texture->updateContents(data.span().data(), update.sourceRect, update.bufferOffset, buffer.stride(), update.buffer->pixelFormat());
+            WTFEndSignpost(this, CopyTextureCPUToGPU);
+        }
         WTFEndSignpost(this, CoordinatedSwapBuffer);
     }
     WTFEndSignpost(this, CoordinatedSwapBuffers);
