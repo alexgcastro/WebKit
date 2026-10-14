@@ -296,6 +296,12 @@ float ScrollingEffectsController::adjustedScrollDestination(ScrollEventAxis axis
 
 #if !PLATFORM(MAC)
 #if ENABLE(KINETIC_SCROLLING)
+void ScrollingEffectsController::setKineticAnimationStartTime(MonotonicTime startTime)
+{
+    if (CheckedPtr kineticAnimation = dynamicDowncast<ScrollAnimationKinetic>(m_currentAnimation.get()); kineticAnimation && kineticAnimation->isActive())
+        kineticAnimation->setStartTime(startTime);
+}
+
 bool ScrollingEffectsController::processWheelEventForKineticScrolling(const PlatformWheelEvent& event)
 {
     if (CheckedPtr kineticAnimation = dynamicDowncast<ScrollAnimationKinetic>(m_currentAnimation.get())) {

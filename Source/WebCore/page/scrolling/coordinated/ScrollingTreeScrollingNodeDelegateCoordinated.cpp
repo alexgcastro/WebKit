@@ -133,11 +133,24 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::handleWheelEvent(const Platf
         // slop). Spread it over the frame before it rather than jumping by it, and give the
         // moves that follow something to interpolate from straight away.
         flushResampledInput();
-        m_inputSamples.append({ wheelEvent.timestamp() - 16_ms, { } });
+        m_inputSamples.append({ wheelEvent.timestamp() - 16_ms, { }, wheelEvent.timestamp() - 16_ms });
+    }
+    bool isDragEnd = wheelEvent.phase() == PlatformWheelEventPhase::Ended && wheelEvent.momentumPhase() == PlatformWheelEventPhase::None;
+    if (!resample && isDragEnd && !m_inputSamples.isEmpty()) {
+        // The fling continues from what is on screen, one frame after the finger's last frame.
+        // Jumping to the newest sample first (up to a frame of travel ahead or, when the frame
+        // predicted past it, behind) and starting the fling at the current time, which the next
+        // frame's vsync could precede, showed every release as a jump and then a stall.
+        auto lastFrameTime = m_lastResampledFrameTime;
+        endResampledInput();
+        bool handled = m_scrollController.handleWheelEvent(wheelEvent);
+        if (lastFrameTime && MonotonicTime::now() - *lastFrameTime < 50_ms)
+            m_scrollController.setKineticAnimationStartTime(*lastFrameTime);
+        return handled;
     }
     if (!resample) {
-        // Anything else (the start or end of the gesture, a fling) starts from where the
-        // finger really is.
+        // Anything else (the start of another gesture, a fling) starts from where the finger
+        // really is.
         flushResampledInput();
         return m_scrollController.handleWheelEvent(wheelEvent);
     }
@@ -158,7 +171,7 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::immediateScrollBy(const Floa
     m_receivedInput += delta;
     if (m_inputSamples.size() == 8)
         m_inputSamples.removeAt(0);
-    m_inputSamples.append({ *m_resamplingEventTime, m_receivedInput });
+    m_inputSamples.append({ *m_resamplingEventTime, m_receivedInput, MonotonicTime::now() });
     // How old a drag sample is when the scrolling thread gets it, and where the finger is.
     WPE_TRACE_COUNTER("wpe.scroll.input-age-us", (MonotonicTime::now() - *m_resamplingEventTime).microsecondsAs<int64_t>());
     WPE_TRACE_COUNTER("wpe.scroll.input-total-y", static_cast<int64_t>(m_receivedInput.height() * 100));
@@ -174,24 +187,35 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         return false;
 
     // Android batches touch input once per frame and resamples it to 5 ms before the frame
-    // time, so that is the point of the finger's path this frame should show. When the frame's
-    // own sample has not arrived yet, extrapolate from the last two, by at most one frame.
+    // time. That sample reaches this thread a few milliseconds after the frame starts, so a
+    // frame could only show it by predicting, and prediction from a jittery finger made steps
+    // uneven (and overshoot at the start of a drag, where the first move carries the touch
+    // slop). Instead each frame shows the finger one frame period earlier, which the samples
+    // that arrived before the frame started always cover, so it only ever interpolates. The
+    // same frame of latency as Chrome, which also shows smooth drags.
     static constexpr Seconds inputLatency = 5_ms;
-    static constexpr Seconds maximumPrediction = 17_ms;
-    auto target = frameTime - inputLatency;
-    auto& last = m_inputSamples.last();
-    FloatSize desired;
-    if (target >= last.time) {
-        desired = last.total;
-        if (m_inputSamples.size() >= 2) {
-            auto& previous = m_inputSamples[m_inputSamples.size() - 2];
-            auto interval = last.time - previous.time;
-            if (interval > 0_s && interval <= 2 * maximumPrediction) {
-                auto ahead = std::min(target - last.time, maximumPrediction);
-                desired = last.total + (last.total - previous.total) * static_cast<float>(ahead / interval);
-            }
+    size_t usable = 0;
+    while (usable < m_inputSamples.size() && m_inputSamples[usable].arrival <= frameTime)
+        ++usable;
+    if (!usable)
+        return true;
+    // Samples come one per frame of the UI process, so their spacing is the frame period.
+    Seconds period = 16_ms;
+    if (usable >= 3) {
+        Vector<Seconds, 8> intervals;
+        for (size_t i = std::max<size_t>(usable, 5) - 4; i < usable; ++i) {
+            if (i)
+                intervals.append(m_inputSamples[i].time - m_inputSamples[i - 1].time);
         }
-    } else if (target <= m_inputSamples.first().time)
+        std::ranges::sort(intervals);
+        period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
+    }
+    auto target = frameTime - inputLatency - period;
+    auto& last = m_inputSamples[usable - 1];
+    FloatSize desired;
+    if (target >= last.time)
+        desired = last.total;
+    else if (target <= m_inputSamples.first().time)
         desired = m_appliedInput;
     else {
         size_t i = 1;
@@ -207,12 +231,22 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     WPE_TRACE_COUNTER("wpe.scroll.resample-ahead-us", (target - last.time).microsecondsAs<int64_t>());
     WPE_TRACE_COUNTER("wpe.scroll.resample-target-age-us", (MonotonicTime::now() - target).microsecondsAs<int64_t>());
     WPE_TRACE_COUNTER("wpe.scroll.resample-behind-y", static_cast<int64_t>((m_receivedInput - desired).height() * 100));
+    m_lastResampledFrameTime = frameTime;
     auto delta = desired - m_appliedInput;
     if (!delta.isZero()) {
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(delta);
         m_appliedInput = desired;
     }
     return true;
+}
+
+void ScrollingTreeScrollingNodeDelegateCoordinated::endResampledInput()
+{
+    WPE_TRACE_COUNTER("wpe.scroll.resample-dropped-y", static_cast<int64_t>((m_receivedInput - m_appliedInput).height() * 100));
+    m_inputSamples.clear();
+    m_receivedInput = { };
+    m_appliedInput = { };
+    m_lastResampledFrameTime = std::nullopt;
 }
 
 void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
@@ -224,6 +258,7 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
     m_inputSamples.clear();
     m_receivedInput = { };
     m_appliedInput = { };
+    m_lastResampledFrameTime = std::nullopt;
     if (!remaining.isZero())
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(remaining);
 }

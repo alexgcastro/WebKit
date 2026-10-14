@@ -60,15 +60,18 @@ private:
     void immediateScrollBy(const FloatSize&, ScrollClamping = ScrollClamping::Clamped) final;
 
     void flushResampledInput();
+    void endResampledInput();
 
     struct InputSample {
         MonotonicTime time;
         FloatSize total;
+        MonotonicTime arrival;
     };
     Vector<InputSample, 8> m_inputSamples;
     FloatSize m_receivedInput;
     FloatSize m_appliedInput;
     std::optional<MonotonicTime> m_resamplingEventTime;
+    std::optional<MonotonicTime> m_lastResampledFrameTime;
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
