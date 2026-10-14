@@ -66,6 +66,8 @@ protected:
 
 public:
     WEBCORE_EXPORT void serviceScrollAnimationsForComposite();
+    // A finger touching down stops a fling, as it does on every touch platform.
+    WEBCORE_EXPORT void stopFlingsForTouchStart();
 
     WEBCORE_EXPORT void LEGACY_NODELETE willSendEventToMainThread(const PlatformWheelEvent&);
     WEBCORE_EXPORT void waitForEventToBeProcessedByMainThread(const PlatformWheelEvent&);

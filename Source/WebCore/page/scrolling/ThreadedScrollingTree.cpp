@@ -772,6 +772,37 @@ bool ThreadedScrollingTree::scrollingThreadDrivesFrames()
     return !nodesWithActiveScrollAnimations().isEmpty() || hasNodesWithActiveUserScrolls();
 }
 
+// debug.wpe.touch.flingcontinues=1 restores the upstream behaviour, where a finger touching down
+// during a fling does not stop it: it only stopped once the next drag was recognised, after the
+// touch slop, so the page kept moving under the finger for 100-400 ms and then jumped.
+static bool flingStopsOnTouchStart()
+{
+#if OS(ANDROID)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.touch.flingcontinues", value) > 0 && !strcmp(value, "1"));
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+void ThreadedScrollingTree::stopFlingsForTouchStart()
+{
+    ASSERT(ScrollingThread::isCurrentThread());
+    if (!flingStopsOnTouchStart())
+        return;
+
+    Locker locker { m_treeLock };
+    for (auto nodeID : nodesWithActiveScrollAnimations()) {
+        if (RefPtr node = dynamicDowncast<ScrollingTreeScrollingNode>(nodeForID(nodeID))) {
+            WPE_TRACE_INSTANT("scroll: touch start stops the fling");
+            node->stopAnimatedScroll({ AnimatedScrollType::User });
+        }
+    }
+}
+
 void ThreadedScrollingTree::serviceScrollAnimationsForComposite()
 {
     ASSERT(ScrollingThread::isCurrentThread());
