@@ -374,6 +374,12 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
         return;
     }
 
+    if (touchEvent->type() == WebEventType::TouchStart) {
+        ScrollingThread::dispatch([scrollingTree] {
+            scrollingTree->stopFlingsForTouchStart();
+        });
+    }
+
     auto trackingType = scrollingTree->eventTrackingTypeForTouchEvent(platform(touchEvent));
 
     // Once a sequence has started scrolling, its remaining events are dispatched without
