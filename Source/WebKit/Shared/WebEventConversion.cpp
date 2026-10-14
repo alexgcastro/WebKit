@@ -585,6 +585,21 @@ MonotonicTime monotonicTimeForEventTimeInMilliseconds(uint64_t timestamp)
     if (!timestamp)
         return MonotonicTime::now();
 
+#if OS(ANDROID)
+    // Android event times are SystemClock.uptimeMillis(), which is CLOCK_MONOTONIC like
+    // MonotonicTime, so no offset needs correcting. Anchoring on the first event instead made
+    // every later timestamp late by however long that first event took to be handled, which
+    // input resampling then turned into the same amount of extra scroll latency. WPEEvent keeps
+    // only 32 bits of milliseconds, so the upper bits come from the current time.
+    uint64_t nowMilliseconds = static_cast<uint64_t>(MonotonicTime::now().secondsSinceEpoch().milliseconds());
+    uint64_t milliseconds = (nowMilliseconds & ~0xffffffffULL) | (timestamp & 0xffffffffULL);
+    if (milliseconds > nowMilliseconds + (1ULL << 31))
+        milliseconds -= 1ULL << 32;
+    else if (milliseconds + (1ULL << 31) < nowMilliseconds)
+        milliseconds += 1ULL << 32;
+    return MonotonicTime::fromRawSeconds(milliseconds / 1000.0);
+#endif
+
     static MonotonicTime firstEventMonotonicTime;
     static uint64_t firstEventTimestamp = 0;
     if (!firstEventTimestamp) {
