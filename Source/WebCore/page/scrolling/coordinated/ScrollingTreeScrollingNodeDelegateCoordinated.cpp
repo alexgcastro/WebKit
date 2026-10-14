@@ -33,6 +33,7 @@
 #include "ScrollingTreeCoordinated.h"
 #include "ScrollingStateFrameScrollingNode.h"
 #include "ScrollingTreeOverflowScrollingNode.h"
+#include <wtf/SystemTracing.h>
 
 #if OS(ANDROID)
 #include <sys/system_properties.h>
@@ -122,6 +123,8 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::handleWheelEvent(const Platf
     // shows them, so each frame showed zero, one or two of them: the page moved 24, 1, 25, 1 px
     // under a finger moving 13 px per frame. Instead, record the finger's movement and apply,
     // on every frame, where it was at that frame's time, as Chrome does.
+    if (wheelEvent.hasPreciseScrollingDeltas())
+        WPE_TRACE_COUNTER("wpe.scroll.wheel-age-us", (MonotonicTime::now() - wheelEvent.timestamp()).microsecondsAs<int64_t>());
     bool isDragStart = wheelEvent.phase() == PlatformWheelEventPhase::Began;
     bool resample = inputResamplingEnabled() && wheelEvent.hasPreciseScrollingDeltas()
         && (wheelEvent.phase() == PlatformWheelEventPhase::Changed || isDragStart) && wheelEvent.momentumPhase() == PlatformWheelEventPhase::None;
@@ -156,6 +159,9 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::immediateScrollBy(const Floa
     if (m_inputSamples.size() == 8)
         m_inputSamples.removeAt(0);
     m_inputSamples.append({ *m_resamplingEventTime, m_receivedInput });
+    // How old a drag sample is when the scrolling thread gets it, and where the finger is.
+    WPE_TRACE_COUNTER("wpe.scroll.input-age-us", (MonotonicTime::now() - *m_resamplingEventTime).microsecondsAs<int64_t>());
+    WPE_TRACE_COUNTER("wpe.scroll.input-total-y", static_cast<int64_t>(m_receivedInput.height() * 100));
 
     // Nothing has moved yet, so nothing asked for a frame; the frame is what applies it.
     if (RefPtr tree = scrollingTree())
@@ -197,6 +203,10 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         desired = a.total + (b.total - a.total) * fraction;
     }
 
+    // Positive: the frame shows a finger position predicted past the newest sample.
+    WPE_TRACE_COUNTER("wpe.scroll.resample-ahead-us", (target - last.time).microsecondsAs<int64_t>());
+    WPE_TRACE_COUNTER("wpe.scroll.resample-target-age-us", (MonotonicTime::now() - target).microsecondsAs<int64_t>());
+    WPE_TRACE_COUNTER("wpe.scroll.resample-behind-y", static_cast<int64_t>((m_receivedInput - desired).height() * 100));
     auto delta = desired - m_appliedInput;
     if (!delta.isZero()) {
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(delta);
@@ -210,6 +220,7 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
     if (m_inputSamples.isEmpty())
         return;
     auto remaining = m_receivedInput - m_appliedInput;
+    WPE_TRACE_COUNTER("wpe.scroll.resample-flush-y", static_cast<int64_t>(remaining.height() * 100));
     m_inputSamples.clear();
     m_receivedInput = { };
     m_appliedInput = { };
