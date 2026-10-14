@@ -41,8 +41,11 @@ bool GestureDetector::handleEvent(WPEEvent* event)
         double x, y;
         if (!wpe_event_get_position(event, &x, &y))
             return { };
-        // Return rounded positions to avoid accumulated rounding errors of deltas.
-        return Position { std::round(x), std::round(y) };
+        // Positions are in logical pixels, so rounding them made a drag move in steps of
+        // whole logical pixels: 2.625 device pixels on a phone at that scale, which a slow
+        // drag shows as uneven motion. Each delta is taken from the previous position, so
+        // the deltas add up to the exact movement without rounding.
+        return Position { x, y };
     };
 
     switch (wpe_event_get_event_type(event)) {
