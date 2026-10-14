@@ -157,6 +157,8 @@ public:
     bool retargetAnimatedScrollBy(FloatSize);
 
     void stopAnimatedScroll();
+    // Moves the start of a running kinetic animation (a fling) back to the given frame time.
+    WEBCORE_EXPORT void setKineticAnimationStartTime(MonotonicTime);
     void stopAnimatedNonRubberbandingScroll();
 
     void stopKeyboardScrolling();

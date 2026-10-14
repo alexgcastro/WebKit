@@ -85,6 +85,8 @@ public:
     FloatPoint currentOffset() const { return m_currentOffset; }
     virtual std::optional<FloatPoint> destinationOffset() const { return std::nullopt; }
     MonotonicTime startTime() const { return m_startTime; }
+    // Lets an animation that continues another motion start on that motion's last frame.
+    void setStartTime(MonotonicTime startTime) { m_startTime = startTime; }
 
     virtual void serviceAnimation(MonotonicTime) = 0;
 
