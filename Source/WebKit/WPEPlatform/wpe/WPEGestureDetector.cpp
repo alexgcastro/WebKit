@@ -66,9 +66,14 @@ bool GestureDetector::handleEvent(WPEEvent* event)
         if (auto position = getPosition(); position && m_position) {
             auto* settings = wpe_display_get_settings(wpe_view_get_display(wpe_event_get_view(event)));
             auto dragActivationThresholdPx = wpe_settings_get_uint32(settings, WPE_SETTING_DRAG_THRESHOLD, nullptr);
-            if (m_gesture != WPE_GESTURE_DRAG && std::hypot(position->x - m_position->x, position->y - m_position->y) > dragActivationThresholdPx) {
+            double distance = std::hypot(position->x - m_position->x, position->y - m_position->y);
+            if (m_gesture != WPE_GESTURE_DRAG && distance > dragActivationThresholdPx) {
                 m_gesture = WPE_GESTURE_DRAG;
-                m_nextDeltaReferencePosition = m_position;
+                // The drag starts where the finger crossed the threshold, as Android and Chrome
+                // do: starting it at the touch point made the first frame jump by the whole
+                // threshold (21 device pixels on a phone) before following the finger.
+                double fraction = dragActivationThresholdPx / distance;
+                m_nextDeltaReferencePosition = Position { m_position->x + (position->x - m_position->x) * fraction, m_position->y + (position->y - m_position->y) * fraction };
                 m_dragBegin = true;
             } else if (m_gesture == WPE_GESTURE_DRAG)
                 m_dragBegin = false;
