@@ -68,6 +68,8 @@ public:
     WEBCORE_EXPORT void serviceScrollAnimationsForComposite();
     // A finger touching down stops a fling, as it does on every touch platform.
     WEBCORE_EXPORT void stopFlingsForTouchStart();
+    // A finger touching down may start a drag: get the vsync grid ready for its first frame.
+    WEBCORE_EXPORT void wakeVSyncClockForTouchStart();
 
     WEBCORE_EXPORT void LEGACY_NODELETE willSendEventToMainThread(const PlatformWheelEvent&);
     WEBCORE_EXPORT void waitForEventToBeProcessedByMainThread(const PlatformWheelEvent&);

@@ -376,6 +376,7 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
 
     if (touchEvent->type() == WebEventType::TouchStart) {
         ScrollingThread::dispatch([scrollingTree] {
+            scrollingTree->wakeVSyncClockForTouchStart();
             scrollingTree->stopFlingsForTouchStart();
         });
     }
