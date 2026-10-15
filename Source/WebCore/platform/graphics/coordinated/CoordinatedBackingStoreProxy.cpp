@@ -35,6 +35,10 @@
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/StringToIntegerConversion.h>
 
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 #if USE(SKIA)
 #include "SkiaRecordingResult.h"
 #endif
@@ -338,6 +342,24 @@ void CoordinatedBackingStoreProxy::invalidateRegion(const Vector<IntRect, 1>& di
     }
 }
 
+// The viewport in device pixels, rounded up like the contents rect is. Truncating it made a page exactly as
+// wide as the viewport look a fraction of a pixel wider at fractional scale factors (411 CSS pixels at 2.625
+// are 1078.875: viewport 1078, contents 1079), so it got half-width tiles plus a column of 1 pixel wide
+// tiles, each with its own recording, texture and draw (19% of the tile updates on a news site).
+// debug.wpe.tiles.slivers=1 restores the truncation.
+static IntSize scaledViewportSize(const IntSize& unscaledViewportSize, float scale)
+{
+#if OS(ANDROID)
+    static const bool truncate = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.tiles.slivers", value) > 0 && !strcmp(value, "1");
+    }();
+    if (truncate)
+        return unscaledViewportSize.scaled(scale);
+#endif
+    return expandedIntSize(FloatSize(unscaledViewportSize).scaled(scale));
+}
+
 void CoordinatedBackingStoreProxy::createOrDestroyTiles(CoordinatedPlatformLayer& layer, const IntRect& unscaledVisibleRect, const IntRect& unscaledContentsRect, const IntSize& unscaledViewportSize, float contentsScale, int maxTextureSize, Damage& damage, Vector<uint32_t>& tilesToCreate, Vector<uint32_t>& tilesToRemove)
 {
 #if USE(CAIRO)
@@ -374,7 +396,7 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(CoordinatedPlatformLayer
 
         bool tileSizeChanged = false;
         if (!m_contentsRect.isEmpty()) {
-            auto tileSize = computeTileSize(unscaledViewportSize.scaled(m_contentsScale), maxTextureSize);
+            auto tileSize = computeTileSize(scaledViewportSize(unscaledViewportSize, m_contentsScale), maxTextureSize);
             tileSizeChanged = m_tileSize != tileSize;
             m_tileSize = WTF::move(tileSize);
         }
