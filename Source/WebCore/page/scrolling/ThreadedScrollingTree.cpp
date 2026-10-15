@@ -788,6 +788,32 @@ static bool flingStopsOnTouchStart()
 #endif
 }
 
+#if OS(ANDROID)
+// debug.wpe.scroll.vsyncwake=0 leaves starting the vsync clock to the first composite that needs it.
+static bool vsyncClockWakesOnTouchStart()
+{
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.vsyncwake", value) > 0 && !strcmp(value, "0"));
+    }();
+    return enabled;
+}
+#endif
+
+void ThreadedScrollingTree::wakeVSyncClockForTouchStart()
+{
+    ASSERT(ScrollingThread::isCurrentThread());
+#if OS(ANDROID)
+    // The vsync clock stops a second after its last use. When a drag starts after a longer pause, its
+    // first composites found no grid and sampled at the current time; once the grid was back, the
+    // sample time jumped back to it, so that frame showed a finger position ~6 ms older than the one
+    // before it: a small step, then a catch-up. Starting the clock at touch down gives it the touch
+    // slop to get a vsync before the first drag frame.
+    if (vsyncSamplingEnabled() && vsyncClockWakesOnTouchStart())
+        AndroidVSyncClock::singleton().keepAlive();
+#endif
+}
+
 void ThreadedScrollingTree::stopFlingsForTouchStart()
 {
     ASSERT(ScrollingThread::isCurrentThread());
