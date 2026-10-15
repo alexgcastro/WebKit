@@ -56,7 +56,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include <wtf/text/StringToIntegerConversion.h>
 
 #if OS(ANDROID)
+#include <WebCore/ThreadedScrollingTree.h>
+#include <dlfcn.h>
 #include <sys/system_properties.h>
+#include <unistd.h>
 #endif
 
 #if USE(GLIB_EVENT_LOOP)
@@ -92,6 +95,89 @@ static bool scrollAnimationsSampledPerComposite()
     return false;
 #endif
 }
+
+#if OS(ANDROID)
+// Android's performance hints (ADPF): the compositor thread reports how long it worked for each frame
+// against the frame period, so the CPU governor raises its clock before that work misses the frame, as
+// SurfaceFlinger, HWUI and Chrome do, and warns before a one-off burst (pre-rendered tiles). Without
+// them a fling's tile flushes ran on the big core at a third of its top clock and held frames for
+// 20-50 ms. debug.wpe.perf.hints=0 disables them. API 33 (spikes: 36), looked up at run time.
+struct PerformanceHintFunctions {
+    void* (*getManager)() { nullptr };
+    void* (*createSession)(void*, const int32_t*, size_t, int64_t) { nullptr };
+    int (*updateTargetWorkDuration)(void*, int64_t) { nullptr };
+    int (*reportActualWorkDuration)(void*, int64_t) { nullptr };
+    void (*closeSession)(void*) { nullptr };
+    int (*notifyWorkloadSpike)(void*, bool, bool, const char*) { nullptr };
+};
+
+static const PerformanceHintFunctions& performanceHintFunctions()
+{
+    static const PerformanceHintFunctions functions = [] {
+        PerformanceHintFunctions functions;
+        char value[PROP_VALUE_MAX] = { };
+        if (__system_property_get("debug.wpe.perf.hints", value) > 0 && !strcmp(value, "0"))
+            return functions;
+        void* android = dlopen("libandroid.so", RTLD_NOW);
+        if (!android)
+            return functions;
+        functions.getManager = reinterpret_cast<decltype(functions.getManager)>(dlsym(android, "APerformanceHint_getManager"));
+        functions.createSession = reinterpret_cast<decltype(functions.createSession)>(dlsym(android, "APerformanceHint_createSession"));
+        functions.updateTargetWorkDuration = reinterpret_cast<decltype(functions.updateTargetWorkDuration)>(dlsym(android, "APerformanceHint_updateTargetWorkDuration"));
+        functions.reportActualWorkDuration = reinterpret_cast<decltype(functions.reportActualWorkDuration)>(dlsym(android, "APerformanceHint_reportActualWorkDuration"));
+        functions.closeSession = reinterpret_cast<decltype(functions.closeSession)>(dlsym(android, "APerformanceHint_closeSession"));
+        functions.notifyWorkloadSpike = reinterpret_cast<decltype(functions.notifyWorkloadSpike)>(dlsym(android, "APerformanceHint_notifyWorkloadSpike"));
+        if (!functions.getManager || !functions.createSession || !functions.updateTargetWorkDuration || !functions.reportActualWorkDuration || !functions.closeSession)
+            functions.createSession = nullptr;
+        return functions;
+    }();
+    return functions;
+}
+
+void ThreadedCompositor::reportCompositorWork(Seconds frameWork)
+{
+    ASSERT(m_workQueue->runLoop().isCurrent());
+    auto& functions = performanceHintFunctions();
+    if (!m_performanceHintSessionTried) {
+        m_performanceHintSessionTried = true;
+        if (functions.createSession) {
+            if (auto* manager = functions.getManager()) {
+                int32_t threadID = gettid();
+                m_performanceHintTargetNanos = 16'666'666;
+                m_performanceHintSession = functions.createSession(manager, &threadID, 1, m_performanceHintTargetNanos);
+            }
+        }
+        WPE_TRACE_INSTANT("perf: performance hint session %s, workload spikes %s", m_performanceHintSession ? "created" : "unavailable", functions.notifyWorkloadSpike ? "supported" : "unsupported");
+    }
+    if (!m_performanceHintSession)
+        return;
+
+    if (auto period = ThreadedScrollingTree::displayRefreshPeriod()) {
+        int64_t target = period->nanosecondsAs<int64_t>();
+        if (target > 0 && target != m_performanceHintTargetNanos) {
+            functions.updateTargetWorkDuration(m_performanceHintSession, target);
+            m_performanceHintTargetNanos = target;
+        }
+    }
+    auto work = frameWork + m_workSinceLastFrame;
+    m_workSinceLastFrame = 0_s;
+    functions.reportActualWorkDuration(m_performanceHintSession, std::max<int64_t>(work.nanosecondsAs<int64_t>(), 1));
+    WPE_TRACE_COUNTER("wpe.perf.reported-work-us", work.microsecondsAs<int64_t>());
+}
+
+void ThreadedCompositor::notifyCompositorWorkloadSpike(const char* reason)
+{
+    auto& functions = performanceHintFunctions();
+    if (m_performanceHintSession && functions.notifyWorkloadSpike)
+        functions.notifyWorkloadSpike(m_performanceHintSession, true, true, reason);
+}
+
+void ThreadedCompositor::closePerformanceHintSession()
+{
+    if (m_performanceHintSession)
+        performanceHintFunctions().closeSession(std::exchange(m_performanceHintSession, nullptr));
+}
+#endif
 
 Ref<ThreadedCompositor> ThreadedCompositor::create(WebPage& webPage, LayerTreeHost& layerTreeHost, CoordinatedSceneState& sceneState)
 {
@@ -183,6 +269,9 @@ void ThreadedCompositor::invalidate()
 
     m_didCompositeRunLoopObserver->invalidate();
     m_workQueue->dispatchSync([this] {
+#if OS(ANDROID)
+        closePerformanceHintSession();
+#endif
 #if USE(TEXTURE_MAPPER)
         if (!m_context || !m_context->makeContextCurrent())
             return;
@@ -327,6 +416,10 @@ void ThreadedCompositor::preRenderedTilesDidChange()
             return;
 #endif
 
+#if OS(ANDROID)
+        notifyCompositorWorkloadSpike("pre-rendered tiles");
+        auto start = MonotonicTime::now();
+#endif
         WPE_TRACE_SCOPE("composite: pre-rendered tiles");
         // Keep processing pending tile updates for at most 2ms while no other composition is requested.
         auto deadline = MonotonicTime::now() + 2_ms;
@@ -340,6 +433,9 @@ void ThreadedCompositor::preRenderedTilesDidChange()
 
         bool hasPendingPreRenderedTiles = m_sceneState->processLayersWithPreRenderedTiles(shouldStopProcessingTiles);
         PlatformDisplay::sharedDisplay().skiaGrContext()->flushAndSubmit(GrSyncCpu::kNo);
+#if OS(ANDROID)
+        m_workSinceLastFrame += MonotonicTime::now() - start;
+#endif
         if (hasPendingPreRenderedTiles)
             preRenderedTilesDidChange();
     });
@@ -640,6 +736,9 @@ void ThreadedCompositor::renderLayerTree()
 #if PLATFORM(GTK) || PLATFORM(WPE)
     TraceScope traceScope(RenderLayerTreeStart, RenderLayerTreeEnd);
 #endif
+#if OS(ANDROID)
+    auto frameStart = MonotonicTime::now();
+#endif
 
     if (m_suspendedCount > 0)
         return;
@@ -726,6 +825,9 @@ void ThreadedCompositor::renderLayerTree()
 
     m_surface->didRenderFrame(targetContents);
     m_surface->sendFrame();
+#if OS(ANDROID)
+    reportCompositorWork(MonotonicTime::now() - frameStart);
+#endif
 
     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
         if (m_layerTreeHost)

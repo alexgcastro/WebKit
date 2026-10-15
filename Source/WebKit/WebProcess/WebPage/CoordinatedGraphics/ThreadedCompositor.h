@@ -232,6 +232,19 @@ private:
 #endif
 
     const std::unique_ptr<WebCore::RunLoopObserver> m_didCompositeRunLoopObserver;
+
+#if OS(ANDROID)
+    void reportCompositorWork(Seconds frameWork);
+    void notifyCompositorWorkloadSpike(const char* reason);
+    void closePerformanceHintSession();
+
+    // Android's performance hint session (ADPF) for the compositor thread, and the work it did between
+    // frames (pre-rendered tiles) since the last frame was reported. Only used on the compositor thread.
+    void* m_performanceHintSession { nullptr };
+    bool m_performanceHintSessionTried { false };
+    int64_t m_performanceHintTargetNanos { 0 };
+    Seconds m_workSinceLastFrame;
+#endif
 };
 
 } // namespace WebKit
