@@ -167,7 +167,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::handleWheelEvent(const Platf
         // slop). Spread it over the frame before it rather than jumping by it, and give the
         // moves that follow something to interpolate from straight away.
         flushResampledInput();
-        m_inputSamples.append({ wheelEvent.timestamp() - 16_ms, { }, wheelEvent.timestamp() - 16_ms });
+        m_inputSamples.append({ wheelEvent.timestamp() - 16_ms, { }, wheelEvent.timestamp() - 16_ms, true });
     }
     bool isDragEnd = wheelEvent.phase() == PlatformWheelEventPhase::Ended && wheelEvent.momentumPhase() == PlatformWheelEventPhase::None;
     if (!resample && isDragEnd && !m_inputSamples.isEmpty()) {
@@ -239,14 +239,19 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     // showed as a catch-up step at the start of every flick.
     Seconds period = inputResamplingTargetSmoothed() && m_measuredInputPeriod ? *m_measuredInputPeriod : 16_ms;
     if (usable >= 3) {
+        // The synthetic point at the start of a drag is 16 ms before the first sample: with smoothing on,
+        // leave that interval out, or with three samples the median is 16 ms, not the real spacing.
+        bool skipSynthetic = inputResamplingTargetSmoothed();
         Vector<Seconds, 8> intervals;
         for (size_t i = std::max<size_t>(usable, 5) - 4; i < usable; ++i) {
-            if (i)
+            if (i && !(skipSynthetic && m_inputSamples[i - 1].synthetic))
                 intervals.append(m_inputSamples[i].time - m_inputSamples[i - 1].time);
         }
-        std::ranges::sort(intervals);
-        period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
-        m_measuredInputPeriod = period;
+        if (!intervals.isEmpty()) {
+            std::ranges::sort(intervals);
+            period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
+            m_measuredInputPeriod = period;
+        }
     }
     auto target = frameTime + inputResamplingLead() - inputLatency - period;
     // Keep the target moving one display period per frame. A frame's time can jump back by several
