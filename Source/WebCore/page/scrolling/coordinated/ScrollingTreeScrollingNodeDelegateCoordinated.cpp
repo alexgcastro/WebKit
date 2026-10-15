@@ -91,6 +91,26 @@ static Seconds inputResamplingLead()
 #endif
 }
 
+// debug.wpe.scroll.resamplemode=chrome resamples as Chrome does on Android (ui/base/prediction/
+// linear_resampling.cc and cc's InputHandlerProxy): the finger 5 ms before the frame time, from the samples
+// that have arrived by the time the frame is sampled (the composite runs several milliseconds after the vsync
+// its frame time is anchored to), extrapolating from the last two samples at most min(8 ms, half their
+// interval) past the newest one, and never stepping against the direction the finger moves. The default
+// shows the finger one sample period earlier still, from samples that arrived before the frame time, so it
+// only interpolates, at about 8 ms more lag with unbatched input.
+static bool chromeStyleInputResampling()
+{
+#if OS(ANDROID)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.scroll.resamplemode", value) > 0 && !strcmp(value, "chrome");
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 // debug.wpe.scroll.resamplesmooth=0 lets the resampling target follow each frame's time as it comes.
 static bool inputResamplingTargetSmoothed()
 {
@@ -228,8 +248,10 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     // that arrived before the frame started always cover, so it only ever interpolates. The
     // same frame of latency as Chrome, which also shows smooth drags.
     static constexpr Seconds inputLatency = 5_ms;
+    bool chromeStyle = chromeStyleInputResampling();
+    auto eligibleUntil = chromeStyle ? MonotonicTime::now() : frameTime;
     size_t usable = 0;
-    while (usable < m_inputSamples.size() && m_inputSamples[usable].arrival <= frameTime)
+    while (usable < m_inputSamples.size() && m_inputSamples[usable].arrival <= eligibleUntil)
         ++usable;
     if (!usable)
         return true;
@@ -253,7 +275,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
             m_measuredInputPeriod = period;
         }
     }
-    auto target = frameTime + inputResamplingLead() - inputLatency - period;
+    auto target = frameTime + inputResamplingLead() - inputLatency - (chromeStyle ? 0_s : period);
     // Keep the target moving one display period per frame. A frame's time can jump back by several
     // milliseconds: the first frames of a drag after a pause sample at the current time because the vsync
     // clock has no grid yet, later ones at the grid. That frame then showed an older finger position than
@@ -274,9 +296,17 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     }
     auto& last = m_inputSamples[usable - 1];
     FloatSize desired;
-    if (target >= last.time)
+    if (target >= last.time) {
         desired = last.total;
-    else if (target <= m_inputSamples.first().time)
+        if (chromeStyle && usable >= 2 && !m_inputSamples[usable - 2].synthetic) {
+            auto& previous = m_inputSamples[usable - 2];
+            auto interval = last.time - previous.time;
+            if (interval >= 2_ms) {
+                auto ahead = std::min(target - last.time, std::min(8_ms, interval / 2));
+                desired = last.total + (last.total - previous.total) * static_cast<float>(ahead / interval);
+            }
+        }
+    } else if (target <= m_inputSamples.first().time)
         desired = m_appliedInput;
     else {
         size_t i = 1;
@@ -298,6 +328,18 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         m_lastCompositeFrameTime = frameTime;
     }
     auto delta = desired - m_appliedInput;
+    if (chromeStyle && usable >= 2) {
+        // Never step against the direction the finger is moving (an extrapolation overshoot corrected).
+        auto movement = last.total - m_inputSamples[usable - 2].total;
+        if (delta.width() * movement.width() < 0) {
+            desired.setWidth(m_appliedInput.width());
+            delta.setWidth(0);
+        }
+        if (delta.height() * movement.height() < 0) {
+            desired.setHeight(m_appliedInput.height());
+            delta.setHeight(0);
+        }
+    }
     if (!delta.isZero()) {
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(delta);
         m_appliedInput = desired;
