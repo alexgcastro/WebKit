@@ -395,10 +395,10 @@ void ScrollingTreeScrollingNode::serviceScrollAnimation(MonotonicTime currentTim
         m_delegate->serviceScrollAnimation(currentTime);
 }
 
-void ScrollingTreeScrollingNode::serviceResampledInput(MonotonicTime time)
+void ScrollingTreeScrollingNode::serviceResampledInput(MonotonicTime time, bool forComposite)
 {
     if (m_delegate)
-        m_delegate->serviceResampledInput(time);
+        m_delegate->serviceResampledInput(time, forComposite);
 }
 
 void ScrollingTreeScrollingNode::setScrollAnimationInProgress(bool animationInProgress)

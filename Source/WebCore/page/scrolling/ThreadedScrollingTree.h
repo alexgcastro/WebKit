@@ -62,7 +62,7 @@ public:
 
 protected:
     // Applies resampled user scroll input (touch drags) for the frame sampled at the given time.
-    virtual void serviceResampledInput(MonotonicTime) WTF_REQUIRES_LOCK(m_treeLock) { }
+    virtual void serviceResampledInput(MonotonicTime, bool /* forComposite */) WTF_REQUIRES_LOCK(m_treeLock) { }
 
 public:
     WEBCORE_EXPORT void serviceScrollAnimationsForComposite();

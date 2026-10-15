@@ -45,7 +45,7 @@ public:
 
     // Applies the finger movement of a touch drag as of the given frame time. Returns true
     // while there is resampled input still to apply.
-    bool serviceResampledInput(MonotonicTime frameTime) final;
+    bool serviceResampledInput(MonotonicTime frameTime, bool forComposite) final;
 
 private:
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
@@ -72,6 +72,8 @@ private:
     FloatSize m_appliedInput;
     std::optional<MonotonicTime> m_resamplingEventTime;
     std::optional<MonotonicTime> m_lastResampledFrameTime;
+    std::optional<MonotonicTime> m_lastResampleTarget;
+    std::optional<MonotonicTime> m_lastCompositeFrameTime;
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)

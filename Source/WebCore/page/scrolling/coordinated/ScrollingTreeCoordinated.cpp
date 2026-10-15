@@ -91,11 +91,11 @@ void ScrollingTreeCoordinated::requestCompositionForResampledInput()
         static_cast<ScrollingTreeFrameScrollingNodeCoordinated*>(rootScrollingNode)->rootContentsLayer()->requestCompositionFromScrolling(CompositionReason::AsyncScrolling);
 }
 
-void ScrollingTreeCoordinated::serviceResampledInput(MonotonicTime frameTime)
+void ScrollingTreeCoordinated::serviceResampledInput(MonotonicTime frameTime, bool forComposite)
 {
     for (auto nodeID : nodesWithActiveUserScrolls()) {
         if (RefPtr node = dynamicDowncast<ScrollingTreeScrollingNode>(nodeForID(nodeID)))
-            node->serviceResampledInput(frameTime);
+            node->serviceResampledInput(frameTime, forComposite);
     }
 }
 

@@ -33,6 +33,7 @@
 #include "ScrollingTreeCoordinated.h"
 #include "ScrollingStateFrameScrollingNode.h"
 #include "ScrollingTreeOverflowScrollingNode.h"
+#include "ThreadedScrollingTree.h"
 #include <wtf/SystemTracing.h>
 
 #if OS(ANDROID)
@@ -87,6 +88,20 @@ static Seconds inputResamplingLead()
     return lead;
 #else
     return 0_s;
+#endif
+}
+
+// debug.wpe.scroll.resamplesmooth=0 lets the resampling target follow each frame's time as it comes.
+static bool inputResamplingTargetSmoothed()
+{
+#if OS(ANDROID)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.resamplesmooth", value) > 0 && !strcmp(value, "0"));
+    }();
+    return enabled;
+#else
+    return false;
 #endif
 }
 
@@ -200,7 +215,7 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::immediateScrollBy(const Floa
         static_cast<ScrollingTreeCoordinated&>(*tree).requestCompositionForResampledInput();
 }
 
-bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(MonotonicTime frameTime)
+bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(MonotonicTime frameTime, bool forComposite)
 {
     if (m_inputSamples.isEmpty())
         return false;
@@ -230,6 +245,22 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
     }
     auto target = frameTime + inputResamplingLead() - inputLatency - period;
+    // Keep the target moving one display period per frame. A frame's time can jump back by several
+    // milliseconds: the first frames of a drag after a pause sample at the current time because the vsync
+    // clock has no grid yet, later ones at the grid. That frame then showed an older finger position than
+    // the one before (a step of almost nothing, then a catch-up: the first stroke after a page load in
+    // 5 of 6 runs). Move towards the frame's own target by at most a millisecond per frame instead.
+    // Only the call right before a composite decides what a frame shows and advances the target; the
+    // one on the display refresh of the same frame only keeps it from going back.
+    auto displayPeriod = ThreadedScrollingTree::displayRefreshPeriod();
+    if (inputResamplingTargetSmoothed() && m_lastResampleTarget && m_lastCompositeFrameTime && displayPeriod && *displayPeriod > 0_s) {
+        if (forComposite) {
+            double frames = std::max(1.0, std::round((frameTime - *m_lastCompositeFrameTime) / *displayPeriod));
+            auto expected = *m_lastResampleTarget + *displayPeriod * frames;
+            target = std::clamp(target, expected - 1_ms, expected + 1_ms);
+        } else
+            target = std::max(target, *m_lastResampleTarget);
+    }
     auto& last = m_inputSamples[usable - 1];
     FloatSize desired;
     if (target >= last.time)
@@ -251,6 +282,10 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     WPE_TRACE_COUNTER("wpe.scroll.resample-target-age-us", (MonotonicTime::now() - target).microsecondsAs<int64_t>());
     WPE_TRACE_COUNTER("wpe.scroll.resample-behind-y", static_cast<int64_t>((m_receivedInput - desired).height() * 100));
     m_lastResampledFrameTime = frameTime;
+    if (forComposite) {
+        m_lastResampleTarget = target;
+        m_lastCompositeFrameTime = frameTime;
+    }
     auto delta = desired - m_appliedInput;
     if (!delta.isZero()) {
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(delta);
@@ -266,6 +301,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::endResampledInput()
     m_receivedInput = { };
     m_appliedInput = { };
     m_lastResampledFrameTime = std::nullopt;
+    m_lastResampleTarget = std::nullopt;
+    m_lastCompositeFrameTime = std::nullopt;
 }
 
 void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
@@ -278,6 +315,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
     m_receivedInput = { };
     m_appliedInput = { };
     m_lastResampledFrameTime = std::nullopt;
+    m_lastResampleTarget = std::nullopt;
+    m_lastCompositeFrameTime = std::nullopt;
     if (!remaining.isZero())
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(remaining);
 }
