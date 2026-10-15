@@ -855,7 +855,7 @@ void ThreadedScrollingTree::serviceScrollAnimationsForComposite()
     WPE_TRACE_SCOPE("scroll: animation sampled for composite");
     auto time = scrollAnimationTime();
     serviceScrollAnimations(time);
-    serviceResampledInput(time);
+    serviceResampledInput(time, true);
     m_state = SynchronizationState::Desynchronized;
     applyLayerPositionsInternal();
 }
@@ -877,7 +877,7 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
     keepScrollAnimationClockAlive();
     auto time = scrollAnimationTime();
     serviceScrollAnimations(time);
-    serviceResampledInput(time);
+    serviceResampledInput(time, false);
 
     if (scrollingThreadDrivesFrames() && canUpdateLayersOnScrollingThread()) {
         m_state = SynchronizationState::Desynchronized;

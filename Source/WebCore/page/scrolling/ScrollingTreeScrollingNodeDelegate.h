@@ -64,7 +64,8 @@ public:
 
     virtual FloatPoint adjustedScrollPosition(const FloatPoint& scrollPosition) const { return scrollPosition; }
     // Applies resampled user scroll input for the frame at the given time (see ScrollingTreeCoordinated).
-    virtual bool serviceResampledInput(MonotonicTime) { return false; }
+    // forComposite: called right before a composite, which shows the result, rather than on a display refresh.
+    virtual bool serviceResampledInput(MonotonicTime, bool /* forComposite */) { return false; }
     virtual String scrollbarStateForOrientation(ScrollbarOrientation) const { return ""_s; }
 
     virtual Vector<PlatformLayerContainer, 2> hitTestableScrollbarLayers() const { return { }; }
