@@ -71,6 +71,25 @@ static bool inputResamplingEnabled()
 #endif
 }
 
+// debug.wpe.scroll.resamplelead=<ms> moves the resampling target that much closer to the frame time.
+// The composite samples a few milliseconds after the vsync its frame time is anchored to, so samples
+// newer than "one sample period before" have often arrived; a constant lead keeps the target spacing
+// even and cuts the lag, as long as it stays below that sampling delay (beyond it, frames predict).
+static Seconds inputResamplingLead()
+{
+#if OS(ANDROID)
+    static const Seconds lead = [] {
+        char value[PROP_VALUE_MAX] = { };
+        if (__system_property_get("debug.wpe.scroll.resamplelead", value) > 0)
+            return Seconds::fromMilliseconds(std::clamp(atof(value), 0.0, 16.0));
+        return 0_s;
+    }();
+    return lead;
+#else
+    return 0_s;
+#endif
+}
+
 FloatPoint ScrollingTreeScrollingNodeDelegateCoordinated::adjustedScrollPosition(const FloatPoint& position) const
 {
     // Rounding to whole CSS pixels leaves a scroll animation only multiples of the device
@@ -210,7 +229,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         std::ranges::sort(intervals);
         period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
     }
-    auto target = frameTime - inputLatency - period;
+    auto target = frameTime + inputResamplingLead() - inputLatency - period;
     auto& last = m_inputSamples[usable - 1];
     FloatSize desired;
     if (target >= last.time)
