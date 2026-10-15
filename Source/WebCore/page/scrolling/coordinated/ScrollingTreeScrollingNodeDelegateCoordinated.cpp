@@ -234,7 +234,10 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     if (!usable)
         return true;
     // Samples come one per frame of the UI process, so their spacing is the frame period.
-    Seconds period = 16_ms;
+    // Until a drag has three samples, use the spacing measured in earlier drags: starting at 16 ms and
+    // switching to the measured 8.3 ms of unbatched 120 Hz input moved the target 7.7 ms at once, which
+    // showed as a catch-up step at the start of every flick.
+    Seconds period = inputResamplingTargetSmoothed() && m_measuredInputPeriod ? *m_measuredInputPeriod : 16_ms;
     if (usable >= 3) {
         Vector<Seconds, 8> intervals;
         for (size_t i = std::max<size_t>(usable, 5) - 4; i < usable; ++i) {
@@ -243,6 +246,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         }
         std::ranges::sort(intervals);
         period = std::clamp(intervals[intervals.size() / 2], 8_ms, 17_ms);
+        m_measuredInputPeriod = period;
     }
     auto target = frameTime + inputResamplingLead() - inputLatency - period;
     // Keep the target moving one display period per frame. A frame's time can jump back by several
@@ -251,13 +255,15 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     // the one before (a step of almost nothing, then a catch-up: the first stroke after a page load in
     // 5 of 6 runs). Move towards the frame's own target by at most a millisecond per frame instead.
     // Only the call right before a composite decides what a frame shows and advances the target; the
-    // one on the display refresh of the same frame only keeps it from going back.
+    // one on the display refresh of the same frame only keeps it from going back. Catching up (the
+    // target behind where it should be) goes twice as fast as falling back, so a forward correction
+    // doesn't keep the frames showing an older finger position for long.
     auto displayPeriod = ThreadedScrollingTree::displayRefreshPeriod();
     if (inputResamplingTargetSmoothed() && m_lastResampleTarget && m_lastCompositeFrameTime && displayPeriod && *displayPeriod > 0_s) {
         if (forComposite) {
             double frames = std::max(1.0, std::round((frameTime - *m_lastCompositeFrameTime) / *displayPeriod));
             auto expected = *m_lastResampleTarget + *displayPeriod * frames;
-            target = std::clamp(target, expected - 1_ms, expected + 1_ms);
+            target = std::clamp(target, expected - 1_ms, expected + 2_ms);
         } else
             target = std::max(target, *m_lastResampleTarget);
     }
