@@ -66,6 +66,8 @@ private:
         MonotonicTime time;
         FloatSize total;
         MonotonicTime arrival;
+        // The point added at the start of a drag to interpolate from, not a real sample.
+        bool synthetic { false };
     };
     Vector<InputSample, 8> m_inputSamples;
     FloatSize m_receivedInput;
