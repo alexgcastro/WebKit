@@ -39,6 +39,13 @@ using namespace WebCore;
 
 static MonotonicTime monotonicTimeForEvent(WPEEvent* event)
 {
+#if OS(ANDROID)
+    // Android input is CLOCK_MONOTONIC, like MonotonicTime, and touch panels report at 120-240 Hz:
+    // whole milliseconds are up to a quarter of the interval between samples, which made resampled
+    // drags uneven. Use the microsecond time when the platform gave one.
+    if (auto timeUsec = wpe_event_get_time_usec(event))
+        return MonotonicTime::fromRawSeconds(timeUsec / 1e6);
+#endif
     auto time = wpe_event_get_time(event);
     if (!time)
         return MonotonicTime::now();

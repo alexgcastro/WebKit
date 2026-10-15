@@ -105,6 +105,9 @@ struct _WPEEvent {
     Variant<WPEEventPointerButton, WPEEventPointerMove, WPEEventScroll, WPEEventKeyboard, WPEEventTouch> variant;
 
     int referenceCount { 1 };
+
+    // Optional, set with wpe_event_set_time_usec(); last so that the positional initializers above stay valid.
+    guint64 timeUsec { 0 };
 };
 
 G_DEFINE_BOXED_TYPE(WPEEvent, wpe_event, wpe_event_ref, wpe_event_unref)
@@ -236,6 +239,38 @@ guint32 wpe_event_get_time(WPEEvent* event)
     g_return_val_if_fail(event, 0);
 
     return event->time;
+}
+
+/**
+ * wpe_event_get_time_usec:
+ * @event: a #WPEEvent
+ *
+ * Get the time stamp of @event in microseconds, when the platform provided one with
+ * wpe_event_set_time_usec(). It uses the same clock as wpe_event_get_time().
+ *
+ * Returns: a time stamp in microseconds or 0
+ */
+guint64 wpe_event_get_time_usec(WPEEvent* event)
+{
+    g_return_val_if_fail(event, 0);
+
+    return event->timeUsec;
+}
+
+/**
+ * wpe_event_set_time_usec:
+ * @event: a #WPEEvent
+ * @time: a time stamp in microseconds
+ *
+ * Set a more precise time stamp for @event, in the same clock as the one passed when
+ * creating it. Touch input is sampled at 120 Hz or more on some platforms, where whole
+ * milliseconds are a significant part of the interval between samples.
+ */
+void wpe_event_set_time_usec(WPEEvent* event, guint64 time)
+{
+    g_return_if_fail(event);
+
+    event->timeUsec = time;
 }
 
 /**
