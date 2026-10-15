@@ -70,6 +70,8 @@ public:
     WEBCORE_EXPORT void stopFlingsForTouchStart();
     // A finger touching down may start a drag: get the vsync grid ready for its first frame.
     WEBCORE_EXPORT void wakeVSyncClockForTouchStart();
+    // The display refresh period, once the vsync clock has seen two vsyncs (Android only).
+    WEBCORE_EXPORT static std::optional<Seconds> displayRefreshPeriod();
 
     WEBCORE_EXPORT void LEGACY_NODELETE willSendEventToMainThread(const PlatformWheelEvent&);
     WEBCORE_EXPORT void waitForEventToBeProcessedByMainThread(const PlatformWheelEvent&);

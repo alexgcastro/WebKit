@@ -84,6 +84,12 @@ public:
         }
     }
 
+    std::optional<Seconds> period() const
+    {
+        int64_t period = m_periodNanos.load();
+        return period ? std::optional { Seconds::fromNanoseconds(period) } : std::nullopt;
+    }
+
     std::optional<MonotonicTime> nextVSync(MonotonicTime now)
     {
         keepAlive();
@@ -799,6 +805,15 @@ static bool vsyncClockWakesOnTouchStart()
     return enabled;
 }
 #endif
+
+std::optional<Seconds> ThreadedScrollingTree::displayRefreshPeriod()
+{
+#if OS(ANDROID)
+    return AndroidVSyncClock::singleton().period();
+#else
+    return std::nullopt;
+#endif
+}
 
 void ThreadedScrollingTree::wakeVSyncClockForTouchStart()
 {
