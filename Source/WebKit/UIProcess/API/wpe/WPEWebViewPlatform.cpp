@@ -539,6 +539,8 @@ void ViewPlatform::handleGesture(WPEEvent* event)
             GRefPtr<WPEEvent> simulatedScrollEvent = adoptGRef(wpe_event_scroll_new(
                 m_wpeView.get(), WPE_INPUT_SOURCE_TOUCHSCREEN, wpe_event_get_time(event), static_cast<WPEModifiers>(0), dx, dy, TRUE, FALSE, x, y
             ));
+            if (auto timeUsec = wpe_event_get_time_usec(event))
+                wpe_event_set_time_usec(simulatedScrollEvent.get(), timeUsec);
             WPE_TRACE_INSTANT("UI: drag -> wheel event (dx %d dy %d)", static_cast<int>(dx), static_cast<int>(dy));
             page().handleNativeWheelEvent(WebKit::NativeWebWheelEvent::create(simulatedScrollEvent.get(), phase));
         }

@@ -164,6 +164,9 @@ WPE_API WPEEventType   wpe_event_get_event_type                 (WPEEvent      *
 WPE_API WPEView       *wpe_event_get_view                       (WPEEvent      *event);
 WPE_API WPEInputSource wpe_event_get_input_source               (WPEEvent      *event);
 WPE_API guint32        wpe_event_get_time                       (WPEEvent      *event);
+WPE_API guint64        wpe_event_get_time_usec                  (WPEEvent      *event);
+WPE_API void           wpe_event_set_time_usec                  (WPEEvent      *event,
+                                                                 guint64        time);
 WPE_API WPEModifiers   wpe_event_get_modifiers                  (WPEEvent      *event);
 WPE_API gboolean       wpe_event_get_position                   (WPEEvent      *event,
                                                                  double        *x,
