@@ -180,7 +180,9 @@ void ThreadedCompositor::invalidate()
     });
     m_sceneState = nullptr;
     m_layerTreeHost = nullptr;
-    m_surface->willDestroyCompositingRunLoop();
+    m_workQueue->dispatchSync([this] {
+        m_surface->willDestroyCompositingRunLoop();
+    });
     m_surface = nullptr;
 }
 

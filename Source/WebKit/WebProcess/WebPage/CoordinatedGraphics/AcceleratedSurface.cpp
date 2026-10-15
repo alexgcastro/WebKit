@@ -1036,13 +1036,11 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
         return;
 #endif
 
-    // m_releaseUnusedBuffersTimer is owned by the compositing run loop and its destructor stops it, so
-    // destroy it on that run loop's thread rather than here on the main thread.
-    if (RefPtr compositingRunLoop = std::exchange(m_compositingRunLoop, nullptr)) {
-        compositingRunLoop->dispatch([protectedThis = Ref { *this }] {
-            protectedThis->m_releaseUnusedBuffersTimer = nullptr;
-        });
-    }
+    // Runs on the compositing run loop, which owns m_releaseUnusedBuffersTimer and must be the
+    // thread that destroys it.
+    if (RefPtr compositingRunLoop = std::exchange(m_compositingRunLoop, nullptr))
+        assertIsCurrent(*compositingRunLoop);
+    m_releaseUnusedBuffersTimer = nullptr;
 #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
     WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
 #endif
