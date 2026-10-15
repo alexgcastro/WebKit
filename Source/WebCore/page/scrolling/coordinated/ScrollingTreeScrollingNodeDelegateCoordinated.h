@@ -74,6 +74,7 @@ private:
     std::optional<MonotonicTime> m_lastResampledFrameTime;
     std::optional<MonotonicTime> m_lastResampleTarget;
     std::optional<MonotonicTime> m_lastCompositeFrameTime;
+    std::optional<Seconds> m_measuredInputPeriod;
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
