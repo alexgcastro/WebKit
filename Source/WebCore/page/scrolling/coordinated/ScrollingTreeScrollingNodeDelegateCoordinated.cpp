@@ -112,8 +112,8 @@ static bool chromeStyleInputResampling()
 #endif
 }
 
-// debug.wpe.scroll.resamplefilter=0 shows extrapolated positions unfiltered in the Chrome-style mode.
-static bool extrapolatedPositionsFiltered()
+// debug.wpe.scroll.resamplefilter=0 shows resampled positions unfiltered in the Chrome-style mode.
+static bool resampledPositionsFiltered()
 {
 #if OS(ANDROID)
     static const bool enabled = [] {
@@ -338,7 +338,8 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     }
     auto& last = m_inputSamples[usable - 1];
     FloatSize desired;
-    bool extrapolated = false;
+    // Whether this is a resampled position (Chrome's "prediction": from two samples, interpolated or extrapolated).
+    bool resampled = false;
     if (target >= last.time) {
         desired = last.total;
         if (chromeStyle && usable >= 2 && !m_inputSamples[usable - 2].synthetic) {
@@ -347,12 +348,13 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
             if (interval >= 2_ms) {
                 auto ahead = std::min(target - last.time, std::min(8_ms, interval / 2));
                 desired = last.total + (last.total - previous.total) * static_cast<float>(ahead / interval);
-                extrapolated = ahead > 0_s;
+                resampled = true;
             }
         }
     } else if (target <= m_inputSamples.first().time)
         desired = m_appliedInput;
     else {
+        resampled = true;
         size_t i = 1;
         while (m_inputSamples[i].time < target)
             ++i;
@@ -360,6 +362,20 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         auto& b = m_inputSamples[i];
         float fraction = b.time > a.time ? static_cast<float>((target - a.time) / (b.time - a.time)) : 1;
         desired = a.total + (b.total - a.total) * fraction;
+    }
+
+    // When composites sample the input themselves (one ran in the last couple of frames), the call on a display
+    // refresh only asks for a frame if the finger position still has to move. Applying its position as well left
+    // it on screen whenever the composite's own (smoothed, filtered) position was a little behind, because the
+    // guard against backward steps kept the composite from undoing it, and it overwrote the time the fling
+    // hands off from. Without composites sampling, the display refresh call keeps applying.
+    bool compositesSample = m_lastCompositeFrameTime && displayPeriod && *displayPeriod > 0_s && frameTime - *m_lastCompositeFrameTime < *displayPeriod * 2.5;
+    if (!forComposite && compositesSample && inputResamplingTargetSmoothed()) {
+        if (desired != m_appliedInput) {
+            if (RefPtr tree = scrollingTree())
+                static_cast<ScrollingTreeCoordinated&>(*tree).requestCompositionForResampledInput();
+        }
+        return true;
     }
 
     // Positive: the frame shows a finger position predicted past the newest sample.
@@ -371,19 +387,28 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         m_lastResampleTarget = target;
         m_lastCompositeFrameTime = frameTime;
     }
-    // As Chrome: every frame's position feeds the filter, only extrapolated ones are shown filtered. Only
-    // the call before a composite, once per frame.
-    if (chromeStyle && forComposite && extrapolatedPositionsFiltered()) {
+    // As Chrome (scroll_predictor.cc): every frame's position feeds the filter and every resampled one is shown
+    // filtered; filtering only the extrapolated ones alternated delayed and current positions. Once per frame,
+    // on the call before the composite.
+    if (chromeStyle && forComposite && resampledPositionsFiltered()) {
         double time = target.secondsSinceEpoch().value();
         double x = m_positionFilterX.filter(desired.width(), time);
         double y = m_positionFilterY.filter(desired.height(), time);
-        if (extrapolated)
+        if (resampled)
             desired = FloatSize(x, y);
+    }
+    // The finger's own movement this frame: the input that arrived since the previous composite (Chrome compares
+    // with the raw event delta), or the last one when nothing new arrived.
+    if (forComposite) {
+        auto rawMovement = m_receivedInput - m_receivedInputAtLastComposite;
+        if (!rawMovement.isZero())
+            m_lastRawMovement = rawMovement;
+        m_receivedInputAtLastComposite = m_receivedInput;
     }
     auto delta = desired - m_appliedInput;
     if (chromeStyle && usable >= 2) {
         // Never step against the direction the finger is moving (an extrapolation overshoot corrected).
-        auto movement = last.total - m_inputSamples[usable - 2].total;
+        auto movement = m_lastRawMovement;
         if (delta.width() * movement.width() < 0) {
             desired.setWidth(m_appliedInput.width());
             delta.setWidth(0);
@@ -411,6 +436,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::endResampledInput()
     m_lastCompositeFrameTime = std::nullopt;
     m_positionFilterX.reset();
     m_positionFilterY.reset();
+    m_receivedInputAtLastComposite = { };
+    m_lastRawMovement = { };
 }
 
 void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
@@ -427,6 +454,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
     m_lastCompositeFrameTime = std::nullopt;
     m_positionFilterX.reset();
     m_positionFilterY.reset();
+    m_receivedInputAtLastComposite = { };
+    m_lastRawMovement = { };
     if (!remaining.isZero())
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(remaining);
 }
