@@ -188,6 +188,10 @@ private:
         bool isWaitingForTiles WTF_GUARDED_BY_LOCK(lock) { false };
         OptionSet<WebCore::CompositionReason> reasons WTF_GUARDED_BY_LOCK(lock);
         Function<void()> didCompositeRenderingUpdateFunction WTF_GUARDED_BY_LOCK(lock);
+#if OS(ANDROID)
+        // When the next frame was first asked for, for the performance hints.
+        std::optional<MonotonicTime> requestTime WTF_GUARDED_BY_LOCK(lock);
+#endif
     } m_state;
 
     struct {
@@ -234,8 +238,8 @@ private:
     const std::unique_ptr<WebCore::RunLoopObserver> m_didCompositeRunLoopObserver;
 
 #if OS(ANDROID)
-    void reportCompositorWork(Seconds frameWork, MonotonicTime frameStart);
-    void notifyCompositorWorkloadIncreaseForScroll(OptionSet<WebCore::CompositionReason>, MonotonicTime frameStart);
+    void reportCompositorWork(Seconds frameWork, std::optional<MonotonicTime> frameVSync);
+    void boostPerformanceHintForScrollIfNeeded(OptionSet<WebCore::CompositionReason>, MonotonicTime frameStart);
     void notifyCompositorWorkloadSpike(const char* reason);
     void closePerformanceHintSession();
 
@@ -245,7 +249,8 @@ private:
     bool m_performanceHintSessionTried { false };
     int64_t m_performanceHintTargetNanos { 0 };
     Seconds m_workSinceLastFrame;
-    std::optional<MonotonicTime> m_lastFrameSentTime;
+    MonotonicTime m_lastFrameCompleteTime;
+    std::optional<MonotonicTime> m_lastScrollingFrameTime;
 #endif
 };
 

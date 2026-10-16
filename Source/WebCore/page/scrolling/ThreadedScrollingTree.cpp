@@ -98,7 +98,14 @@ public:
         if (!vsync || !period)
             return std::nullopt;
         int64_t current = static_cast<int64_t>(now.secondsSinceEpoch().value() * 1e9);
-        if (current < vsync || current - vsync > 4 * period)
+        if (current < vsync) {
+            // A time shortly before the latest vsync (asked for after it arrived): step back on the grid.
+            int64_t framesBack = (vsync - current + period - 1) / period;
+            if (framesBack > 4)
+                return std::nullopt;
+            return MonotonicTime::fromRawSeconds((vsync - framesBack * period) / 1e9);
+        }
+        if (current - vsync > 4 * period)
             return std::nullopt;
         int64_t frames = (current - vsync) / period;
         return MonotonicTime::fromRawSeconds((vsync + frames * period) / 1e9);
