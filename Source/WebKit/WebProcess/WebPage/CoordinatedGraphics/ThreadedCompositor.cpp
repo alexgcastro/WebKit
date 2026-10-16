@@ -833,8 +833,17 @@ void ThreadedCompositor::renderLayerTree()
 
 #if OS(ANDROID)
     // The vsync this frame belongs to: the one at or before the moment it could first start (asked for, and the
-    // previous frame done, one frame being in flight at a time), taken before rendering.
-    auto frameReady = std::min(std::max(frameRequestTime.value_or(frameStart), m_lastFrameCompleteTime), frameStart);
+    // previous frame done, one frame being in flight at a time), taken before rendering. SurfaceFlinger takes a frame
+    // on the vsync after it is sent; the frame-done message itself can wait behind tile work on this thread, so its
+    // arrival would hide that wait.
+    std::optional<MonotonicTime> previousFrameDone;
+    if (m_lastFrameSentTime) {
+        auto vsync = ThreadedScrollingTree::vsyncAtOrBefore(*m_lastFrameSentTime);
+        auto period = ThreadedScrollingTree::displayRefreshPeriod();
+        if (vsync && period)
+            previousFrameDone = *vsync + *period;
+    }
+    auto frameReady = std::min(std::max(frameRequestTime.value_or(frameStart), previousFrameDone.value_or(MonotonicTime { })), frameStart);
     auto frameVSync = ThreadedScrollingTree::vsyncAtOrBefore(frameReady);
     boostPerformanceHintForScrollIfNeeded(reasons, frameStart);
 #endif
@@ -864,6 +873,7 @@ void ThreadedCompositor::renderLayerTree()
     m_surface->sendFrame();
 #if OS(ANDROID)
     reportCompositorWork(MonotonicTime::now() - frameStart, frameVSync);
+    m_lastFrameSentTime = MonotonicTime::now();
 #endif
 
     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
@@ -940,9 +950,6 @@ void ThreadedCompositor::scheduleUpdateLocked()
 void ThreadedCompositor::frameComplete()
 {
     ASSERT(m_workQueue->runLoop().isCurrent());
-#if OS(ANDROID)
-    m_lastFrameCompleteTime = MonotonicTime::now();
-#endif
 
     Locker locker { m_state.lock };
     WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");

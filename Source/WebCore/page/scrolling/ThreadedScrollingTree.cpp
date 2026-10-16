@@ -101,7 +101,7 @@ public:
         if (current < vsync) {
             // A time shortly before the latest vsync (asked for after it arrived): step back on the grid.
             int64_t framesBack = (vsync - current + period - 1) / period;
-            if (framesBack > 4)
+            if (framesBack > 16)
                 return std::nullopt;
             return MonotonicTime::fromRawSeconds((vsync - framesBack * period) / 1e9);
         }
