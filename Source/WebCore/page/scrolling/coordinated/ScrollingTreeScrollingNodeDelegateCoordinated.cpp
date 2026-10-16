@@ -239,14 +239,23 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::handleWheelEvent(const Platf
         // frame's vsync could precede, showed every release as a jump and then a stall.
         auto lastFrameTime = m_lastResampledFrameTime;
         auto notShownYet = m_receivedInput - m_appliedInput;
+        // Only in the direction the finger moved: m_appliedInput includes what scroll limits clamped away (and
+        // what an extrapolation overshot), which must not pull the page back.
+        if (notShownYet.width() * m_lastRawMovement.width() <= 0)
+            notShownYet.setWidth(0);
+        if (notShownYet.height() * m_lastRawMovement.height() <= 0)
+            notShownYet.setHeight(0);
         endResampledInput();
         bool handled = m_scrollController.handleWheelEvent(wheelEvent);
         RefPtr tree = scrollingTree();
         bool flinging = tree && tree->isScrollAnimationInProgressForNode(scrollingNode()->scrollingNodeID());
-        if (!flinging && !notShownYet.isZero() && inputResamplingTargetSmoothed()) {
+        // Not with scroll snapping either: the snap position has been chosen already.
+        if (!flinging && !notShownYet.isZero() && inputResamplingTargetSmoothed() && !m_scrollController.usesScrollSnap()) {
             // Without a fling, end where the finger lifted: the frames showed the finger a little in the past,
             // and dropping what they had not shown yet left the page short of it.
             ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(notShownYet);
+            if (tree)
+                static_cast<ScrollingTreeCoordinated&>(*tree).requestCompositionForResampledInput();
         } else if (lastFrameTime && MonotonicTime::now() - *lastFrameTime < 50_ms)
             m_scrollController.setKineticAnimationStartTime(*lastFrameTime);
         return handled;
@@ -361,7 +370,6 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     } else if (target <= m_inputSamples.first().time)
         desired = m_appliedInput;
     else {
-        resampled = true;
         size_t i = 1;
         while (m_inputSamples[i].time < target)
             ++i;
@@ -369,15 +377,18 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
         auto& b = m_inputSamples[i];
         float fraction = b.time > a.time ? static_cast<float>((target - a.time) / (b.time - a.time)) : 1;
         desired = a.total + (b.total - a.total) * fraction;
+        // From two real samples, as Chrome's predictor needs (not from the synthetic drag-start point).
+        resampled = !a.synthetic;
     }
 
-    // When composites sample the input themselves (one ran in the last couple of frames), the call on a display
+    // When composites sample the input themselves (they did once: it's a process-wide setting), the call on a display
     // refresh only asks for a frame if the finger position still has to move. Applying its position as well left
     // it on screen whenever the composite's own (smoothed, filtered) position was a little behind, because the
     // guard against backward steps kept the composite from undoing it, and it overwrote the time the fling
     // hands off from. Without composites sampling, the display refresh call keeps applying.
-    bool compositesSample = m_lastCompositeFrameTime && displayPeriod && *displayPeriod > 0_s && frameTime - *m_lastCompositeFrameTime < *displayPeriod * 2.5;
-    if (!forComposite && compositesSample && inputResamplingTargetSmoothed()) {
+    if (forComposite)
+        m_compositesSampleInput = true;
+    if (!forComposite && m_compositesSampleInput && inputResamplingTargetSmoothed()) {
         if (desired != m_appliedInput) {
             if (RefPtr tree = scrollingTree())
                 static_cast<ScrollingTreeCoordinated&>(*tree).requestCompositionForResampledInput();
@@ -406,7 +417,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     }
     // The finger's own movement this frame: the input that arrived since the previous composite (Chrome compares
     // with the raw event delta), or the last one when nothing new arrived.
-    if (forComposite) {
+    if (forComposite || !m_compositesSampleInput) {
         auto rawMovement = m_receivedInput - m_receivedInputAtLastComposite;
         if (!rawMovement.isZero())
             m_lastRawMovement = rawMovement;
