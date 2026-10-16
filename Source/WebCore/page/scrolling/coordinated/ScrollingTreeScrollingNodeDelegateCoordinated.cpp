@@ -112,22 +112,30 @@ static bool chromeStyleInputResampling()
 #endif
 }
 
-// debug.wpe.scroll.resamplefilter=0 shows resampled positions unfiltered in the Chrome-style mode.
-static bool resampledPositionsFiltered()
+// debug.wpe.scroll.resamplefilter=0 shows resampled positions unfiltered in the Chrome-style mode;
+// debug.wpe.scroll.resamplefilter=<Hz> sets the filter's minimum cutoff (Chrome's 4.7 Hz by default). With
+// Chrome's cutoff, drags on a Pixel 7 were perfectly even but showed the finger ~15 ms later.
+static double resampledPositionFilterMinCutoff()
 {
 #if OS(ANDROID)
-    static const bool enabled = [] {
+    static const double cutoff = [] {
         char value[PROP_VALUE_MAX] = { };
-        return !(__system_property_get("debug.wpe.scroll.resamplefilter", value) > 0 && !strcmp(value, "0"));
+        if (__system_property_get("debug.wpe.scroll.resamplefilter", value) > 0)
+            return std::max(atof(value), 0.0);
+        return 4.7; // Chrome's default (ui/base/prediction/one_euro_filter.h), tuned on its jank metrics.
     }();
-    return enabled;
+    return cutoff;
 #else
-    return false;
+    return 0;
 #endif
 }
 
-// Chrome's defaults (ui/base/prediction/one_euro_filter.h), tuned on its jank metrics.
-static constexpr double oneEuroMinCutoff = 4.7;
+static bool resampledPositionsFiltered()
+{
+    return resampledPositionFilterMinCutoff() > 0;
+}
+
+// Chrome's defaults (ui/base/prediction/one_euro_filter.h).
 static constexpr double oneEuroBeta = 0.01;
 static constexpr double oneEuroDerivativeCutoff = 1;
 
@@ -148,7 +156,7 @@ double ScrollingTreeScrollingNodeDelegateCoordinated::OneEuroFilter::filter(doub
     }
     double derivative = (value - *filtered) * frequency;
     filteredDerivative += oneEuroAlpha(oneEuroDerivativeCutoff, frequency) * (derivative - filteredDerivative);
-    double cutoff = oneEuroMinCutoff + oneEuroBeta * std::abs(filteredDerivative);
+    double cutoff = resampledPositionFilterMinCutoff() + oneEuroBeta * std::abs(filteredDerivative);
     *filtered += oneEuroAlpha(cutoff, frequency) * (value - *filtered);
     return *filtered;
 }
