@@ -375,9 +375,19 @@ void EventDispatcher::touchEvent(PageIdentifier pageID, FrameIdentifier frameID,
     }
 
     if (touchEvent->type() == WebEventType::TouchStart) {
-        ScrollingThread::dispatch([scrollingTree] {
+        // Where a single finger touched down: its tap, if it becomes one, is sent there.
+        std::optional<DoublePoint> touchPosition;
+        if (touchEvent->touchPoints().size() == 1)
+            touchPosition = touchEvent->touchPoints()[0].position();
+        ScrollingThread::dispatch([scrollingTree, pageID, touchPosition] {
             scrollingTree->wakeVSyncClockForTouchStart();
-            scrollingTree->stopFlingsForTouchStart();
+            bool stoppedFling = scrollingTree->stopFlingsForTouchStart();
+            // Every touch start sets it, so a stop is forgotten when the next finger touches down.
+            // The tap's mouse events come after the touch end's reply, behind this on the main thread.
+            RunLoop::mainSingleton().dispatch([pageID, tapSuppressionPosition = stoppedFling ? touchPosition : std::nullopt] {
+                if (RefPtr webPage = WebProcess::singleton().webPage(pageID))
+                    webPage->setTapSuppressionPosition(tapSuppressionPosition);
+            });
         });
     }
 

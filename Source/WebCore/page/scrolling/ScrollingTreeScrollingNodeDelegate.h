@@ -46,6 +46,7 @@ public:
     virtual bool startAnimatedScrollToPosition(FloatPoint) = 0;
 
     virtual void stopAnimatedScroll(EnumSet<AnimatedScrollType>) = 0;
+    virtual bool isAnimatingMomentumScroll() const { return false; }
 
     virtual void serviceScrollAnimation(MonotonicTime) = 0;
 

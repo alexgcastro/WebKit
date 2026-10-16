@@ -846,19 +846,23 @@ void ThreadedScrollingTree::wakeVSyncClockForTouchStart()
 #endif
 }
 
-void ThreadedScrollingTree::stopFlingsForTouchStart()
+bool ThreadedScrollingTree::stopFlingsForTouchStart()
 {
     ASSERT(ScrollingThread::isCurrentThread());
     if (!flingStopsOnTouchStart())
-        return;
+        return false;
 
+    bool stoppedFling = false;
     Locker locker { m_treeLock };
     for (auto nodeID : nodesWithActiveScrollAnimations()) {
         if (RefPtr node = dynamicDowncast<ScrollingTreeScrollingNode>(nodeForID(nodeID))) {
             WPE_TRACE_INSTANT("scroll: touch start stops the fling");
+            // Only a fling counts: a page's own smooth scroll does not make the tap a stop.
+            stoppedFling |= node->isAnimatingMomentumScroll();
             node->stopAnimatedScroll({ AnimatedScrollType::User });
         }
     }
+    return stoppedFling;
 }
 
 void ThreadedScrollingTree::serviceScrollAnimationsForComposite()

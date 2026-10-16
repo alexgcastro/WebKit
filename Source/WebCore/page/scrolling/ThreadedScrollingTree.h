@@ -66,8 +66,9 @@ protected:
 
 public:
     WEBCORE_EXPORT void serviceScrollAnimationsForComposite();
-    // A finger touching down stops a fling, as it does on every touch platform.
-    WEBCORE_EXPORT void stopFlingsForTouchStart();
+    // A finger touching down stops a fling, as it does on every touch platform. Returns whether
+    // a fling was moving the content: the tap of that finger then must not click.
+    WEBCORE_EXPORT bool stopFlingsForTouchStart();
     // A finger touching down may start a drag: get the vsync grid ready for its first frame.
     WEBCORE_EXPORT void wakeVSyncClockForTouchStart();
     // The display refresh period, once the vsync clock has seen two vsyncs (Android only).

@@ -60,6 +60,7 @@ protected:
 
     bool startAnimatedScrollToPosition(FloatPoint) override;
     void stopAnimatedScroll(EnumSet<AnimatedScrollType>) override;
+    bool isAnimatingMomentumScroll() const override { return m_scrollController.isAnimatingMomentumScroll(); }
     void serviceScrollAnimation(MonotonicTime) override;
 
     // ScrollingEffectsControllerClient.
