@@ -236,7 +236,8 @@ private:
     const std::unique_ptr<WebCore::RunLoopObserver> m_didCompositeRunLoopObserver;
 
 #if OS(ANDROID)
-    void reportCompositorWork(Seconds frameWork);
+    void reportCompositorWork(Seconds frameWork, MonotonicTime frameStart);
+    void notifyCompositorWorkloadIncreaseForScroll(OptionSet<WebCore::CompositionReason>, MonotonicTime frameStart);
     void notifyCompositorWorkloadSpike(const char* reason);
     void closePerformanceHintSession();
 
@@ -246,6 +247,7 @@ private:
     bool m_performanceHintSessionTried { false };
     int64_t m_performanceHintTargetNanos { 0 };
     Seconds m_workSinceLastFrame;
+    std::optional<MonotonicTime> m_lastFrameSentTime;
 #endif
 };
 

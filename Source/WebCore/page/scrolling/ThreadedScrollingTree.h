@@ -72,6 +72,8 @@ public:
     WEBCORE_EXPORT void wakeVSyncClockForTouchStart();
     // The display refresh period, once the vsync clock has seen two vsyncs (Android only).
     WEBCORE_EXPORT static std::optional<Seconds> displayRefreshPeriod();
+    // The latest vsync at or before the given time, when the vsync clock knows the grid (Android only).
+    WEBCORE_EXPORT static std::optional<MonotonicTime> vsyncAtOrBefore(MonotonicTime);
 
     WEBCORE_EXPORT void LEGACY_NODELETE willSendEventToMainThread(const PlatformWheelEvent&);
     WEBCORE_EXPORT void waitForEventToBeProcessedByMainThread(const PlatformWheelEvent&);
