@@ -92,6 +92,8 @@ private:
     OneEuroFilter m_positionFilterY;
     FloatSize m_receivedInputAtLastComposite;
     FloatSize m_lastRawMovement;
+    // Composites sample the input (debug.wpe.scroll.samplepercomposite, on by default); set on the first such call.
+    bool m_compositesSampleInput { false };
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
