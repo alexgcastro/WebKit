@@ -78,6 +78,19 @@ private:
     std::optional<MonotonicTime> m_lastCompositeFrameTime;
     std::optional<Seconds> m_measuredInputPeriod;
 
+    // The 1-euro filter Chrome applies to extrapolated scroll positions (ui/base/prediction/one_euro_filter):
+    // a low-pass whose cutoff rises with speed, one per axis.
+    struct OneEuroFilter {
+        double filter(double value, double timeSeconds);
+        void reset() { *this = { }; }
+        double frequency { 60 };
+        std::optional<double> lastTime;
+        std::optional<double> filtered;
+        double filteredDerivative { 0 };
+    };
+    OneEuroFilter m_positionFilterX;
+    OneEuroFilter m_positionFilterY;
+
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
     const Ref<ScrollerPairCoordinated> m_scrollerPair;

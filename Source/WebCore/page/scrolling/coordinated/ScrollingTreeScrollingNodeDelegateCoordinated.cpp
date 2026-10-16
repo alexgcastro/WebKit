@@ -34,6 +34,7 @@
 #include "ScrollingStateFrameScrollingNode.h"
 #include "ScrollingTreeOverflowScrollingNode.h"
 #include "ThreadedScrollingTree.h"
+#include <numbers>
 #include <wtf/SystemTracing.h>
 
 #if OS(ANDROID)
@@ -109,6 +110,47 @@ static bool chromeStyleInputResampling()
 #else
     return false;
 #endif
+}
+
+// debug.wpe.scroll.resamplefilter=0 shows extrapolated positions unfiltered in the Chrome-style mode.
+static bool extrapolatedPositionsFiltered()
+{
+#if OS(ANDROID)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return !(__system_property_get("debug.wpe.scroll.resamplefilter", value) > 0 && !strcmp(value, "0"));
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+// Chrome's defaults (ui/base/prediction/one_euro_filter.h), tuned on its jank metrics.
+static constexpr double oneEuroMinCutoff = 4.7;
+static constexpr double oneEuroBeta = 0.01;
+static constexpr double oneEuroDerivativeCutoff = 1;
+
+static double oneEuroAlpha(double cutoff, double frequency)
+{
+    double tau = 1 / (2 * std::numbers::pi * cutoff);
+    return 1 / (1 + tau * frequency);
+}
+
+double ScrollingTreeScrollingNodeDelegateCoordinated::OneEuroFilter::filter(double value, double timeSeconds)
+{
+    if (lastTime && timeSeconds > *lastTime)
+        frequency = 1 / (timeSeconds - *lastTime);
+    lastTime = timeSeconds;
+    if (!filtered) {
+        filtered = value;
+        return value;
+    }
+    double derivative = (value - *filtered) * frequency;
+    filteredDerivative += oneEuroAlpha(oneEuroDerivativeCutoff, frequency) * (derivative - filteredDerivative);
+    double cutoff = oneEuroMinCutoff + oneEuroBeta * std::abs(filteredDerivative);
+    *filtered += oneEuroAlpha(cutoff, frequency) * (value - *filtered);
+    return *filtered;
 }
 
 // debug.wpe.scroll.resamplesmooth=0 lets the resampling target follow each frame's time as it comes.
@@ -296,6 +338,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     }
     auto& last = m_inputSamples[usable - 1];
     FloatSize desired;
+    bool extrapolated = false;
     if (target >= last.time) {
         desired = last.total;
         if (chromeStyle && usable >= 2 && !m_inputSamples[usable - 2].synthetic) {
@@ -304,6 +347,7 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
             if (interval >= 2_ms) {
                 auto ahead = std::min(target - last.time, std::min(8_ms, interval / 2));
                 desired = last.total + (last.total - previous.total) * static_cast<float>(ahead / interval);
+                extrapolated = ahead > 0_s;
             }
         }
     } else if (target <= m_inputSamples.first().time)
@@ -326,6 +370,15 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::serviceResampledInput(Monoto
     if (forComposite) {
         m_lastResampleTarget = target;
         m_lastCompositeFrameTime = frameTime;
+    }
+    // As Chrome: every frame's position feeds the filter, only extrapolated ones are shown filtered. Only
+    // the call before a composite, once per frame.
+    if (chromeStyle && forComposite && extrapolatedPositionsFiltered()) {
+        double time = target.secondsSinceEpoch().value();
+        double x = m_positionFilterX.filter(desired.width(), time);
+        double y = m_positionFilterY.filter(desired.height(), time);
+        if (extrapolated)
+            desired = FloatSize(x, y);
     }
     auto delta = desired - m_appliedInput;
     if (chromeStyle && usable >= 2) {
@@ -356,6 +409,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::endResampledInput()
     m_lastResampledFrameTime = std::nullopt;
     m_lastResampleTarget = std::nullopt;
     m_lastCompositeFrameTime = std::nullopt;
+    m_positionFilterX.reset();
+    m_positionFilterY.reset();
 }
 
 void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
@@ -370,6 +425,8 @@ void ScrollingTreeScrollingNodeDelegateCoordinated::flushResampledInput()
     m_lastResampledFrameTime = std::nullopt;
     m_lastResampleTarget = std::nullopt;
     m_lastCompositeFrameTime = std::nullopt;
+    m_positionFilterX.reset();
+    m_positionFilterY.reset();
     if (!remaining.isZero())
         ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(remaining);
 }
