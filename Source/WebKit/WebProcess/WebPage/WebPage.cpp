@@ -391,6 +391,10 @@
 #include <WebCore/MHTMLArchive.h>
 #endif
 
+#if OS(ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 #if ENABLE(POINTER_LOCK)
 #include <WebCore/PointerLockController.h>
 #endif
@@ -4297,12 +4301,68 @@ void WebPage::contextMenuForKeyEvent()
 }
 #endif
 
+// debug.wpe.touch.clickafterflingstop=1 lets the tap that stops a fling click, as it did before.
+static bool tapAfterFlingStopClicks()
+{
+#if OS(ANDROID)
+    static const bool clicks = [] {
+        char value[PROP_VALUE_MAX] = { };
+        return __system_property_get("debug.wpe.touch.clickafterflingstop", value) > 0 && !strcmp(value, "1");
+    }();
+    return clicks;
+#else
+    return false;
+#endif
+}
+
+// A finger touching down during a fling stops it (ThreadedScrollingTree::stopFlingsForTouchStart()). If
+// it lifts without dragging, that tap must not click what it landed on: it was meant to stop the content,
+// as on Android, iOS and in Chrome (which drops every tap gesture of that touch). The UI process detects
+// the tap once the finger lifts and sends it as a mouse move, down and up at the touch-down position, so
+// those are dropped, up to the mouse up. A drag sends no mouse events; the next touch start forgets it.
+bool WebPage::shouldSuppressTapAfterFlingStop(const WebMouseEvent& mouseEvent)
+{
+    if (!m_tapSuppressionPosition || tapAfterFlingStopClicks())
+        return false;
+
+    // Touch and mouse positions are both truncated to whole logical pixels from the same point.
+    auto position = mouseEvent.position();
+    if (std::abs(position.x() - m_tapSuppressionPosition->x()) > 1 || std::abs(position.y() - m_tapSuppressionPosition->y()) > 1)
+        return false;
+
+    bool isTap = mouseEvent.syntheticClickType() == WebMouseEventSyntheticClickType::OneFingerTap;
+    switch (mouseEvent.type()) {
+    case WebEventType::MouseMove:
+        if (mouseEvent.button() != WebMouseEventButton::None)
+            return false;
+        break;
+    case WebEventType::MouseDown:
+        if (!isTap)
+            return false;
+        break;
+    case WebEventType::MouseUp:
+        if (!isTap)
+            return false;
+        m_tapSuppressionPosition = std::nullopt;
+        break;
+    default:
+        return false;
+    }
+    WPE_TRACE_INSTANT("touch: the tap that stopped a fling does not click (%s)", mouseEvent.type() == WebEventType::MouseMove ? "move" : mouseEvent.type() == WebEventType::MouseDown ? "down" : "up");
+    return true;
+}
+
 void WebPage::mouseEvent(FrameIdentifier frameID, Ref<WebMouseEvent>&& mouseEventRef, std::optional<Vector<SandboxExtension::Handle>>&& sandboxExtensions, CompletionHandler<void(bool, std::optional<RemoteUserInputEventData>)>&& completionHandler)
 {
     const auto& mouseEvent = mouseEventRef.get();
     SetForScope userIsInteractingChange { m_userIsInteracting, true };
 
     m_internals->userActivity.impulse();
+
+    if (shouldSuppressTapAfterFlingStop(mouseEvent)) {
+        completionHandler(true, std::nullopt);
+        return;
+    }
 
     bool shouldHandleEvent = true;
 #if ENABLE(DRAG_SUPPORT)

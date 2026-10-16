@@ -1995,6 +1995,9 @@ public:
     bool userIsInteracting() const { return m_userIsInteracting; }
     void setUserIsInteracting(bool userIsInteracting) { m_userIsInteracting = userIsInteracting; }
 
+    // Where the finger that stopped a fling touched down; its tap does not click (see mouseEvent()).
+    void setTapSuppressionPosition(std::optional<WebCore::DoublePoint> position) { m_tapSuppressionPosition = position; }
+
     static void adjustSettingsForLockdownMode(WebCore::Settings&, const WebPreferencesStore*);
 
 #if PLATFORM(COCOA)
@@ -2492,6 +2495,7 @@ private:
     void setLastKnownMousePosition(WebCore::FrameIdentifier, const WebCore::DoublePoint&, const WebCore::DoublePoint&, std::optional<WebCore::LastKnownMousePositionSource>&& = std::nullopt);
     void mousePointerDidDisappear();
     void mouseDidLeaveLocalRoot(WebCore::FrameIdentifier);
+    bool shouldSuppressTapAfterFlingStop(const WebMouseEvent&);
 
 #if ENABLE(IOS_TOUCH_EVENTS)
     void touchEventSync(const WebTouchEvent&, CompletionHandler<void(bool)>&&);
@@ -3215,6 +3219,7 @@ private:
 
     bool m_userIsInteracting { false };
     bool m_hasEverDisplayedContextMenu { false };
+    std::optional<WebCore::DoublePoint> m_tapSuppressionPosition;
 
     enum class UserInteractionFlag : uint8_t {
         FocusedElement      = 1 << 0,

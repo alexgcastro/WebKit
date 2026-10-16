@@ -101,6 +101,8 @@ public:
 
     virtual bool startAnimatedScrollToPosition(FloatPoint);
     virtual void stopAnimatedScroll(EnumSet<AnimatedScrollType>);
+    // Whether a fling is moving the content.
+    bool isAnimatingMomentumScroll() const;
 
     virtual void serviceScrollAnimation(MonotonicTime);
     void serviceResampledInput(MonotonicTime, bool forComposite);

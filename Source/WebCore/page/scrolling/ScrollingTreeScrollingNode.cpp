@@ -389,6 +389,11 @@ void ScrollingTreeScrollingNode::stopAnimatedScroll(EnumSet<AnimatedScrollType> 
         m_delegate->stopAnimatedScroll(scrollTypesToStop);
 }
 
+bool ScrollingTreeScrollingNode::isAnimatingMomentumScroll() const
+{
+    return m_delegate && m_delegate->isAnimatingMomentumScroll();
+}
+
 void ScrollingTreeScrollingNode::serviceScrollAnimation(MonotonicTime currentTime)
 {
     if (m_delegate)

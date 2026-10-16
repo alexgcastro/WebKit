@@ -187,6 +187,18 @@ void ScrollingEffectsController::stopAnimatedScroll()
         animation->stop();
 }
 
+bool ScrollingEffectsController::isAnimatingMomentumScroll() const
+{
+    CheckedPtr animation = m_currentAnimation.get();
+    if (!animation || !animation->isActive())
+        return false;
+#if ENABLE(KINETIC_SCROLLING) && !PLATFORM(MAC)
+    if (is<ScrollAnimationKinetic>(*animation))
+        return true;
+#endif
+    return is<ScrollAnimationMomentum>(*animation);
+}
+
 bool ScrollingEffectsController::startMomentumScrollWithInitialVelocity(const FloatPoint& initialOffset, const FloatSize& initialVelocity, const FloatSize& initialDelta, NOESCAPE const Function<FloatPoint(const FloatPoint&)>& destinationModifier)
 {
     if (m_currentAnimation) {
