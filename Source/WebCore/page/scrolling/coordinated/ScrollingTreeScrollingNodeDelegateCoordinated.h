@@ -90,6 +90,8 @@ private:
     };
     OneEuroFilter m_positionFilterX;
     OneEuroFilter m_positionFilterY;
+    FloatSize m_receivedInputAtLastComposite;
+    FloatSize m_lastRawMovement;
 
     bool m_scrollAnimatorEnabled { false };
 #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
