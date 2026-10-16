@@ -238,9 +238,16 @@ bool ScrollingTreeScrollingNodeDelegateCoordinated::handleWheelEvent(const Platf
         // predicted past it, behind) and starting the fling at the current time, which the next
         // frame's vsync could precede, showed every release as a jump and then a stall.
         auto lastFrameTime = m_lastResampledFrameTime;
+        auto notShownYet = m_receivedInput - m_appliedInput;
         endResampledInput();
         bool handled = m_scrollController.handleWheelEvent(wheelEvent);
-        if (lastFrameTime && MonotonicTime::now() - *lastFrameTime < 50_ms)
+        RefPtr tree = scrollingTree();
+        bool flinging = tree && tree->isScrollAnimationInProgressForNode(scrollingNode()->scrollingNodeID());
+        if (!flinging && !notShownYet.isZero() && inputResamplingTargetSmoothed()) {
+            // Without a fling, end where the finger lifted: the frames showed the finger a little in the past,
+            // and dropping what they had not shown yet left the page short of it.
+            ThreadedScrollingTreeScrollingNodeDelegate::immediateScrollBy(notShownYet);
+        } else if (lastFrameTime && MonotonicTime::now() - *lastFrameTime < 50_ms)
             m_scrollController.setKineticAnimationStartTime(*lastFrameTime);
         return handled;
     }
