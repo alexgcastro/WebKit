@@ -251,7 +251,7 @@ private:
     bool m_performanceHintSessionTried { false };
     int64_t m_performanceHintTargetNanos { 0 };
     Seconds m_workSinceLastFrame;
-    MonotonicTime m_lastFrameCompleteTime;
+    std::optional<MonotonicTime> m_lastFrameSentTime;
     std::optional<MonotonicTime> m_lastScrollingFrameTime;
 #endif
 };
