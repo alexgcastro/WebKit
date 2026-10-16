@@ -102,13 +102,18 @@ static bool scrollAnimationsSampledPerComposite()
 // SurfaceFlinger, HWUI and Chrome do, and warns before a one-off burst (pre-rendered tiles). Without
 // them a fling's tile flushes ran on the big core at a third of its top clock and held frames for
 // 20-50 ms. debug.wpe.perf.hints=0 disables them. API 33 (spikes: 36), looked up at run time.
+// debug.wpe.perf.hints=chrome reports as Chrome does (components/viz/service/display/display.cc and
+// display_scheduler.cc): the time from the frame's vsync until it is sent, against 3/4 of the frame
+// period, and a workload increase on the first scrolling frame after a pause (Chrome boosts on touch start).
 struct PerformanceHintFunctions {
+    bool chromeLike { false };
     void* (*getManager)() { nullptr };
     void* (*createSession)(void*, const int32_t*, size_t, int64_t) { nullptr };
     int (*updateTargetWorkDuration)(void*, int64_t) { nullptr };
     int (*reportActualWorkDuration)(void*, int64_t) { nullptr };
     void (*closeSession)(void*) { nullptr };
     int (*notifyWorkloadSpike)(void*, bool, bool, const char*) { nullptr };
+    int (*notifyWorkloadIncrease)(void*, bool, bool, const char*) { nullptr };
 };
 
 static const PerformanceHintFunctions& performanceHintFunctions()
@@ -116,8 +121,11 @@ static const PerformanceHintFunctions& performanceHintFunctions()
     static const PerformanceHintFunctions functions = [] {
         PerformanceHintFunctions functions;
         char value[PROP_VALUE_MAX] = { };
-        if (__system_property_get("debug.wpe.perf.hints", value) > 0 && !strcmp(value, "0"))
-            return functions;
+        if (__system_property_get("debug.wpe.perf.hints", value) > 0) {
+            if (!strcmp(value, "0"))
+                return functions;
+            functions.chromeLike = !strcmp(value, "chrome");
+        }
         void* android = dlopen("libandroid.so", RTLD_NOW);
         if (!android)
             return functions;
@@ -127,6 +135,7 @@ static const PerformanceHintFunctions& performanceHintFunctions()
         functions.reportActualWorkDuration = reinterpret_cast<decltype(functions.reportActualWorkDuration)>(dlsym(android, "APerformanceHint_reportActualWorkDuration"));
         functions.closeSession = reinterpret_cast<decltype(functions.closeSession)>(dlsym(android, "APerformanceHint_closeSession"));
         functions.notifyWorkloadSpike = reinterpret_cast<decltype(functions.notifyWorkloadSpike)>(dlsym(android, "APerformanceHint_notifyWorkloadSpike"));
+        functions.notifyWorkloadIncrease = reinterpret_cast<decltype(functions.notifyWorkloadIncrease)>(dlsym(android, "APerformanceHint_notifyWorkloadIncrease"));
         if (!functions.getManager || !functions.createSession || !functions.updateTargetWorkDuration || !functions.reportActualWorkDuration || !functions.closeSession)
             functions.createSession = nullptr;
         return functions;
@@ -134,7 +143,7 @@ static const PerformanceHintFunctions& performanceHintFunctions()
     return functions;
 }
 
-void ThreadedCompositor::reportCompositorWork(Seconds frameWork)
+void ThreadedCompositor::reportCompositorWork(Seconds frameWork, MonotonicTime frameStart)
 {
     ASSERT(m_workQueue->runLoop().isCurrent());
     auto& functions = performanceHintFunctions();
@@ -153,7 +162,7 @@ void ThreadedCompositor::reportCompositorWork(Seconds frameWork)
         return;
 
     if (auto period = ThreadedScrollingTree::displayRefreshPeriod()) {
-        int64_t target = period->nanosecondsAs<int64_t>();
+        int64_t target = (functions.chromeLike ? *period * 0.75 : *period).nanosecondsAs<int64_t>();
         if (target > 0 && target != m_performanceHintTargetNanos) {
             functions.updateTargetWorkDuration(m_performanceHintSession, target);
             m_performanceHintTargetNanos = target;
@@ -161,8 +170,22 @@ void ThreadedCompositor::reportCompositorWork(Seconds frameWork)
     }
     auto work = frameWork + m_workSinceLastFrame;
     m_workSinceLastFrame = 0_s;
+    if (functions.chromeLike) {
+        if (auto vsync = ThreadedScrollingTree::vsyncAtOrBefore(frameStart))
+            work = MonotonicTime::now() - *vsync;
+    }
     functions.reportActualWorkDuration(m_performanceHintSession, std::max<int64_t>(work.nanosecondsAs<int64_t>(), 1));
     WPE_TRACE_COUNTER("wpe.perf.reported-work-us", work.microsecondsAs<int64_t>());
+}
+
+void ThreadedCompositor::notifyCompositorWorkloadIncreaseForScroll(OptionSet<CompositionReason> reasons, MonotonicTime frameStart)
+{
+    auto& functions = performanceHintFunctions();
+    bool afterPause = !m_lastFrameSentTime || frameStart - *m_lastFrameSentTime > 100_ms;
+    if (m_performanceHintSession && functions.chromeLike && functions.notifyWorkloadIncrease && afterPause && reasons.contains(CompositionReason::AsyncScrolling)) {
+        WPE_TRACE_INSTANT("perf: workload increase, scrolling after a pause");
+        functions.notifyWorkloadIncrease(m_performanceHintSession, true, false, "scroll");
+    }
 }
 
 void ThreadedCompositor::notifyCompositorWorkloadSpike(const char* reason)
@@ -801,6 +824,9 @@ void ThreadedCompositor::renderLayerTree()
         WebProcess::singleton().eventDispatcher().serviceScrollAnimationsForComposite(m_pageID);
 #endif
 
+#if OS(ANDROID)
+    notifyCompositorWorkloadIncreaseForScroll(reasons, frameStart);
+#endif
     WTFBeginSignpost(this, FlushCompositingState);
     flushCompositingState(reasons);
     WTFEndSignpost(this, FlushCompositingState);
@@ -826,7 +852,8 @@ void ThreadedCompositor::renderLayerTree()
     m_surface->didRenderFrame(targetContents);
     m_surface->sendFrame();
 #if OS(ANDROID)
-    reportCompositorWork(MonotonicTime::now() - frameStart);
+    reportCompositorWork(MonotonicTime::now() - frameStart, frameStart);
+    m_lastFrameSentTime = MonotonicTime::now();
 #endif
 
     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {

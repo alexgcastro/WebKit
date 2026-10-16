@@ -815,6 +815,16 @@ std::optional<Seconds> ThreadedScrollingTree::displayRefreshPeriod()
 #endif
 }
 
+std::optional<MonotonicTime> ThreadedScrollingTree::vsyncAtOrBefore(MonotonicTime time)
+{
+#if OS(ANDROID)
+    return AndroidVSyncClock::singleton().nextVSync(time);
+#else
+    UNUSED_PARAM(time);
+    return std::nullopt;
+#endif
+}
+
 void ThreadedScrollingTree::wakeVSyncClockForTouchStart()
 {
     ASSERT(ScrollingThread::isCurrentThread());
