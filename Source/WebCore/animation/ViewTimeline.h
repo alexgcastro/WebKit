@@ -111,6 +111,8 @@ private:
 
     bool isViewTimeline() const final { return true; }
 
+    void animationTimingDidChange(WebAnimation&) final;
+
     struct CurrentTimeData {
         float scrollOffset { 0 };
         float maxScrollOffset { 0 };

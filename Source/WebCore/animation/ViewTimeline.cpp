@@ -33,6 +33,7 @@
 #include "Element.h"
 #include "FloatQuad.h"
 #include "LegacyRenderSVGModelObject.h"
+#include "Page.h"
 #include "RenderBlock.h"
 #include "RenderBoxModelObject.h"
 #include "RenderElementInlines.h"
@@ -326,6 +327,18 @@ WebAnimationTime ViewTimeline::epsilon() const
     // values around the 0% and 100% thresholds. To that end, we'll allow for a 0.1pt tolerance.
     float pointTolerance = 0.1;
     return WebAnimationTime::fromPercentage(pointTolerance / m_cachedCurrentTimeData.subjectSize * 100);
+}
+
+void ViewTimeline::animationTimingDidChange(WebAnimation& animation)
+{
+    AnimationTimeline::animationTimingDidChange(animation);
+
+    auto subject = m_subject.styleable();
+    if (!subject || !animation.pending() || animation.isEffectInvalidationSuspended())
+        return;
+
+    if (RefPtr page = subject->element.document().page())
+        page->scheduleRenderingUpdate(RenderingUpdateStep::Animations);
 }
 
 AnimationTimeline::ShouldUpdateAnimationsAndSendEvents ViewTimeline::documentWillUpdateAnimationsAndSendEvents()

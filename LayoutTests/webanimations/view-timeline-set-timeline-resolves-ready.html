@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+#scroller {
+    overflow-y: scroll;
+    width: 300px;
+    height: 200px;
+}
+#target {
+    margin: 800px 10px;
+    width: 100px;
+    height: 100px;
+    background-color: green;
+}
+</style>
+</head>
+<body>
+<div id="scroller">
+    <div id="target"></div>
+</div>
+<script src="../resources/testharness.js"></script>
+<script src="../resources/testharnessreport.js"></script>
+<script>
+
+setup({ explicit_done: true });
+
+window.onload = async () => {
+    scroller.scrollTop = 750;
+    for (let i = 0; i < 10; i++)
+        await new Promise(resolve => requestAnimationFrame(resolve));
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    promise_test(async () => {
+        const animation = target.animate([
+            { offset: "cover 0%", opacity: 0 },
+            { offset: "cover 100%", opacity: 1 }
+        ], {
+            rangeStart: { rangeName: "contain", offset: CSS.percent(0) },
+            rangeEnd: { rangeName: "contain", offset: CSS.percent(100) },
+            duration: 10000,
+            fill: "both"
+        });
+        await animation.ready;
+
+        animation.timeline = new ViewTimeline({ subject: target });
+        assert_true(animation.pending, "Setting a view timeline on a running animation makes it pending.");
+        await animation.ready;
+
+        assert_false(animation.pending);
+        assert_approx_equals(animation.effect.getComputedTiming().progress, 0.5, 1e-6);
+        animation.cancel();
+    }, "Setting a ViewTimeline on a running animation resolves its ready promise without a scroll or other rendering update request.");
+
+    done();
+};
+
+</script>
+</body>
+</html>
