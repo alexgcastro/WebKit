@@ -98,8 +98,13 @@ void CoordinatedBackingStoreProxy::Update::appendUpdate(Vector<uint32_t>&& tiles
 
 void CoordinatedBackingStoreProxy::Update::waitUntilPaintingFinished()
 {
-    for (auto& update : m_tilesToUpdate)
+    for (auto& update : m_tilesToUpdate) {
+#if USE(SKIA) && !USE(TEXTURE_MAPPER)
+        if (update.buffer->distance())
+            continue;
+#endif
         update.buffer->waitUntilPaintingFinished();
+    }
 }
 
 CoordinatedBackingStoreProxy::Tile::Tile(uint32_t id, IntRect&& tileRect)
@@ -229,6 +234,24 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
 
             return false;
         });
+
+#if !USE(TEXTURE_MAPPER)
+        if (tile.distance && tile.isDirty() && !tile.activeBuffers.isEmpty()) {
+            bool didCancelBuffers = false;
+            tile.activeBuffers.removeAllMatching([&](auto& buffer) {
+                if (auto tileRenderingUpdateID = buffer->cancelPainting())
+                    layer.didPaintTile();
+                if (buffer->paintingState() != CoordinatedTileBuffer::PaintingState::Cancelled)
+                    return false;
+                didCancelBuffers = true;
+                return true;
+            });
+            if (didCancelBuffers) {
+                tile.addDirtyRect(tile.rect);
+                tileManager.didChangePaintingTaskPriorities();
+            }
+        }
+#endif
 #endif
 
         if (tile.isDirty()) {

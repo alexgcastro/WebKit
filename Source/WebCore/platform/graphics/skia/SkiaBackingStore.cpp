@@ -241,6 +241,11 @@ void SkiaBackingStore::drawDebugBorders(SkCanvas& canvas, const SkPaint& paint)
 
 void SkiaBackingStore::Tile::scheduleUpdate(const IntRect& dirtyRect, const IntRect& tileRect, CoordinatedTileBuffer& buffer)
 {
+    if (!m_isVisible) {
+        m_pendingUpdates.removeAllMatching([&](auto& update) {
+            return update.tileRect == tileRect && dirtyRect.contains(update.dirtyRect);
+        });
+    }
     m_pendingUpdates.append({ tileRect, dirtyRect, Ref { buffer } });
 }
 
