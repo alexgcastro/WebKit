@@ -442,6 +442,7 @@ void ThreadedCompositor::preRenderedTilesDidChange()
         notifyCompositorWorkloadSpike("pre-rendered tiles");
         auto start = MonotonicTime::now();
 #endif
+        WPE_TRACE_SCOPE("composite: pre-rendered tiles");
         // Keep processing pending tile updates for at most 2ms while no other composition is requested.
         auto deadline = MonotonicTime::now() + 2_ms;
         Function<bool()> shouldStopProcessingTiles = [&] -> bool {

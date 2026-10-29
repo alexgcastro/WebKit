@@ -92,12 +92,16 @@ bool SkiaBackingStore::processPendingTileUpdates(ProcessHiddenTiles processHidde
     m_hasPendingTileUpdates = false;
     m_hasPaddedTiles = false;
     bool wasStopped = false;
+    unsigned deferredTiles = 0;
     for (auto& tile : m_tiles.values()) {
         if (!wasStopped)
             wasStopped = tile.processPendingUpdateIfNeeded(processHiddenTiles, shouldStopProcessingTiles);
-        m_hasPendingTileUpdates |= tile.hasPendingUpdates();
+        bool stillPending = tile.hasPendingUpdates();
+        m_hasPendingTileUpdates |= stillPending;
+        deferredTiles += stillPending;
         m_hasPaddedTiles |= tile.isPadded();
     }
+    WPE_TRACE_COUNTER("wpe.tiles.deferred", deferredTiles);
 
     return wasStopped;
 }
